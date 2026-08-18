@@ -43,6 +43,15 @@ create table if not exists stock_entries (
   entered_at timestamptz not null default now()
 );
 
+-- Movimentações de estoque (entrada/saída) — essa tabela já existia mas
+-- nunca era usada; agora vira o "livro-caixa" do estoque. Toda venda passa
+-- a gerar automaticamente uma saída aqui (sem duplicar nada), e entradas
+-- manuais (compra de fornecedor etc.) também passam a ficar registradas.
+alter table stock_entries add column if not exists movement_type text not null default 'entrada'; -- entrada | saida
+alter table stock_entries add column if not exists location text; -- Manhuaçu | BH
+alter table stock_entries add column if not exists order_key uuid; -- pedido relacionado, quando a saída vem de uma venda
+alter table stock_entries add column if not exists reason text; -- motivo (Venda, Compra de fornecedor, Ajuste, etc.)
+
 -- Clientes
 create table if not exists clients (
   id uuid primary key default gen_random_uuid(),

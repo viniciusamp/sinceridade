@@ -6,6 +6,28 @@ Leva uns 10 minutos, sem precisar programar.
 
 ## Novidades desta versão
 
+- **Movimentações de estoque (nova aba):** toda vez que uma venda sai do
+  estoque, o app agora registra automaticamente essa **saída** — sem nenhum
+  passo extra e sem duplicar nada. Também dá pra registrar **entradas**
+  manuais (compra de fornecedor etc.) pelo botão **"+ Registrar entrada"**.
+  - Cada movimentação guarda: data/hora, tipo (entrada/saída), produto,
+    quantidade, localidade, usuário responsável, motivo, pedido relacionado
+    (quando a saída vem de uma venda) e observação.
+  - Filtros: período (Hoje/Ontem/Semana/Mês/Personalizado/Todos), produto,
+    usuário, localidade e tipo.
+  - **Relatório de entradas por usuário** — mostra quantas entradas e
+    quantos pacotes cada pessoa registrou no período, com total geral.
+  - **Entrada × Saída × Estoque** — ao filtrar por um produto específico, o
+    app mostra o estoque calculado no início do período, quanto entrou,
+    quanto saiu e o estoque atual (esse último sempre em tempo real, vindo
+    direto do cadastro do produto — o "início do período" é calculado a
+    partir dele, não é uma foto salva do passado).
+  - Se você apagar um pedido (na aba Pedidos), a saída de estoque
+    correspondente também é removida do histórico — para o relatório nunca
+    mostrar um movimento "fantasma" de uma venda que não existe mais.
+  - Os botões rápidos de **+ / −** na aba Estoque (que já existiam) também
+    passaram a gerar uma movimentação simples ("Ajuste rápido"), pra nada
+    ficar de fora do histórico.
 - **Pedidos virou a tela central de vendas.** A antiga aba "Vendas" foi
   removida — agora tudo acontece em **Pedidos**:
   - Botão **"+ Novo Pedido"** abre o formulário de venda (cliente, vendedor,
@@ -123,6 +145,10 @@ Leva uns 10 minutos, sem precisar programar.
 
 - Tabela nova **order_deliveries**: guarda só o status de entrega de cada
   pedido (usada pela aba Pedidos). Não duplica vendas nem mexe em estoque.
+- Na tabela **stock_entries** (já existia, mas agora é usada de verdade):
+  `movement_type` (entrada/saída), `location`, `order_key` (pedido
+  relacionado, quando a saída vem de uma venda) e `reason` (motivo). É o que
+  alimenta a nova aba Movimentações.
 
 > Se você já usava uma versão antiga do app, rode o `supabase-schema.sql`
 > novamente — ele foi atualizado e cria as tabelas/colunas que faltavam. É
