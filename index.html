@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Estoque & Vendas — Café</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@500;600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  :root{
+    --bg:#F4EEDF; --surface:#FBF7EF; --card:#FFFFFF; --border:#E7DEC6; --border-strong:#DCD0B8;
+    --ink:#2B1D14; --muted:#7A6A54; --muted2:#9A8A6D; --accent:#4C6B4F; --accent-dark:#3E5941;
+    --warn-bg:#FBF3E0; --warn-border:#EAD7A8; --warn-text:#8A5A16;
+    --danger:#B5432E; --danger-bg:#F7E2DD; --danger-text:#8C3A26;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0; background:var(--bg); font-family:'Inter',sans-serif; color:var(--ink);}
+  .mono{font-family:'JetBrains Mono',monospace;}
+  .serif{font-family:'Fraunces',serif;}
+  #app{max-width:520px; margin:0 auto; min-height:100vh; background:var(--bg);}
+  header{background:var(--ink); color:#fff; padding:20px 20px 16px; display:flex; align-items:center; justify-content:space-between;}
+  header h1{font-size:18px; margin:0; display:flex; align-items:center; gap:8px;}
+  header p{font-size:12px; color:#C9B896; margin:4px 0 0;}
+  .header-left{display:flex; flex-direction:column;}
+  #btn-logout{background:none; border:none; color:#C9B896; cursor:pointer; font-size:18px; padding:4px; opacity:.7;}
+  #btn-logout:hover{opacity:1;}
+  nav{display:flex; border-bottom:1px solid var(--border); background:var(--surface); position:sticky; top:0; z-index:5;}
+  nav button{flex:1; padding:10px 2px; background:none; border:none; border-bottom:2px solid transparent; font-size:11px; font-weight:500; color:var(--muted2); cursor:pointer; white-space:nowrap;}
+  nav button.active{color:var(--ink); border-color:var(--accent);}
+  main{padding:20px;}
+  .btn{border-radius:10px; border:1px solid var(--border-strong); padding:9px 14px; font-size:13px; font-weight:500; cursor:pointer; background:var(--card); color:var(--ink);}
+  .btn:hover{background:var(--surface);}
+  .btn-dark{background:var(--ink); color:#fff; border:none;}
+  .btn-dark:hover{background:#42301F;}
+  .btn-accent{background:var(--accent); color:#fff; border:none;}
+  .btn-accent:hover{background:var(--accent-dark);}
+  .btn-accent:disabled{opacity:.4; cursor:default;}
+  input, select{width:100%; border:1px solid var(--border-strong); border-radius:8px; padding:8px 10px; font-size:15px; background:#fff; color:var(--ink); font-family:inherit;}
+  input:focus, select:focus{outline:2px solid rgba(76,107,79,.35); border-color:var(--accent);}
+  label.field-label{font-size:13px; color:var(--muted); display:block; margin-bottom:4px;}
+  .card{background:var(--card); border:1px solid var(--border); border-radius:12px; padding:14px;}
+  .row{display:flex; align-items:center; justify-content:space-between; gap:8px;}
+  .badge{font-size:11px; font-weight:500; padding:2px 8px; border-radius:999px;}
+  .badge-ok{background:#E7EFE3; color:#3E5941;}
+  .badge-low{background:#F8ECD4; color:#8A5A16;}
+  .badge-out{background:var(--danger-bg); color:var(--danger-text);}
+  .icon-btn{
+    border:none; background:none; cursor:pointer; color:var(--muted2);
+    font-size:20px; line-height:1; padding:8px; border-radius:8px;
+    display:inline-flex; align-items:center; justify-content:center;
+    min-width:40px; min-height:40px;
+  }
+  .icon-btn:hover{color:var(--ink); background:var(--surface);}
+  .icon-btn.danger:hover{color:var(--danger); background:var(--danger-bg);}
+  .modal-backdrop{position:fixed; inset:0; background:rgba(30,20,12,.45); display:flex; align-items:center; justify-content:center; z-index:50; padding:16px;}
+  .modal{background:var(--surface); border:1px solid var(--border-strong); border-radius:16px; padding:20px; width:100%; max-width:420px; max-height:90vh; overflow-y:auto;}
+  .empty{text-align:center; padding:40px 16px; border:1px dashed var(--border-strong); border-radius:12px; color:var(--muted);}
+  .qty-btn{width:28px; height:28px; border-radius:8px; border:1px solid var(--border-strong); background:#fff; display:flex; align-items:center; justify-content:center; cursor:pointer; color:var(--ink); font-size:16px;}
+  .metric{background:var(--card); border-radius:12px; padding:14px; border:1px solid var(--border);}
+  .metric .label{font-size:12px; color:var(--muted2); display:flex; align-items:center; gap:6px; margin-bottom:6px;}
+  .metric .value{font-size:20px; font-weight:500;}
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:12px;}
+  .sync-dot{width:7px; height:7px; border-radius:50%; background:#7CB77F; display:inline-block; margin-right:5px;}
+  .sync-dot.off{background:#C9B896;}
+  .badge-pix{background:#E3F2FD; color:#1565C0;}
+  .badge-dinheiro{background:#E7EFE3; color:#3E5941;}
+  .badge-cartao{background:#F3E5F5; color:#6A1B9A;}
+  .badge-prazo{background:#FFF3E0; color:#E65100;}
+  .badge-loc{background:var(--surface); color:var(--muted); border:1px solid var(--border-strong);}
+  .badge-aberto{background:var(--danger-bg); color:var(--danger-text);}
+  .badge-parcial{background:#F8ECD4; color:#8A5A16;}
+  .badge-pago{background:#E7EFE3; color:#3E5941;}
+  .loc-grid{display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:10px; border-top:1px solid var(--border); padding-top:10px;}
+  .loc-block{display:flex; flex-direction:column; gap:6px;}
+  .loc-label{font-size:11px; font-weight:500; color:var(--muted2); text-transform:uppercase; letter-spacing:.04em;}
+  .profit-preview{background:var(--warn-bg); border:1px solid var(--warn-border); border-radius:8px; padding:10px 12px; font-size:12px; display:flex; flex-direction:column; gap:4px;}
+  .profit-preview .profit-row{display:flex; justify-content:space-between;}
+  .profit-preview .profit-good{color:var(--accent-dark); font-weight:500;}
+  .sale-totals{border-top:1px solid var(--border); padding-top:10px; display:flex; flex-direction:column; gap:4px; font-size:13px; color:var(--muted);}
+  ::-webkit-scrollbar{width:8px;} ::-webkit-scrollbar-thumb{background:var(--border-strong); border-radius:4px;}
+
+  /* ── Login Screen ─────────────────────────────────────── */
+  #login-screen{
+    position:fixed; inset:0; background:var(--bg);
+    display:flex; align-items:center; justify-content:center;
+    z-index:200; padding:24px;
+  }
+  #login-card{
+    background:var(--card); border:1px solid var(--border-strong);
+    border-radius:20px; padding:32px 28px;
+    width:100%; max-width:360px;
+    display:flex; flex-direction:column; gap:20px;
+    box-shadow:0 8px 32px rgba(43,29,20,.14);
+  }
+  #login-icon{font-size:48px; text-align:center; line-height:1;}
+  #login-title{margin:0; font-size:22px; text-align:center; font-family:'Fraunces',serif;}
+  #login-sub{margin:0; font-size:13px; color:var(--muted); text-align:center;}
+  #login-fields{display:flex; flex-direction:column; gap:12px;}
+  #login-error{display:none; color:var(--danger); font-size:13px; text-align:center; background:var(--danger-bg); border-radius:8px; padding:8px 12px;}
+  #login-btn{width:100%; padding:12px; border-radius:10px; background:var(--ink); color:#fff; border:none; font-size:15px; font-weight:500; cursor:pointer; font-family:inherit;}
+  #login-btn:hover{background:#42301F;}
+  #login-footer{font-size:11px; color:var(--muted2); text-align:center;}
+
+  /* ── Wheel Picker ─────────────────────────────────────── */
+  /* Nomes de classe alinhados com os gerados por buildWheelPicker() em app.js
+     (antes o CSS usava o prefixo "wp-" enquanto o JS gerava "wheel-", então
+     nada era aplicado). Altura de item = 28px, para bater com itemHeight no JS. */
+  .wheel-wrap{
+    position:relative; height:140px; border-radius:12px;
+    border:1px solid var(--border-strong);
+    overflow:hidden; background:var(--surface);
+    user-select:none; -webkit-user-select:none;
+  }
+  .wheel-scroll{
+    height:100%; overflow-y:scroll; scroll-snap-type:y mandatory;
+    -webkit-overflow-scrolling:touch;
+    scrollbar-width:none;
+    padding:56px 0; /* (140 - 28) / 2, permite centralizar o 1º e o último item */
+  }
+  .wheel-scroll::-webkit-scrollbar{display:none;}
+  .wheel-item{
+    height:28px;
+    display:flex; align-items:center; justify-content:center;
+    scroll-snap-align:center;
+    font-family:'JetBrains Mono',monospace;
+    font-size:14px; color:var(--muted2);
+    transition:opacity .1s, transform .1s, color .1s;
+    cursor:pointer;
+  }
+  .wheel-item.center{ color:var(--ink); font-weight:600; }
+  .wheel-fade-top, .wheel-fade-bottom{
+    position:absolute; left:0; right:0; height:50px; pointer-events:none; z-index:1;
+  }
+  .wheel-fade-top{top:0; background:linear-gradient(to bottom,#FBF7EF 0%,rgba(251,247,239,0) 100%);}
+  .wheel-fade-bottom{bottom:0; background:linear-gradient(to top,#FBF7EF 0%,rgba(251,247,239,0) 100%);}
+  .wheel-highlight{
+    position:absolute; left:10px; right:10px; top:56px; height:28px; pointer-events:none; z-index:2;
+    border-top:1.5px solid var(--border-strong);
+    border-bottom:1.5px solid var(--border-strong);
+  }
+
+  /* ── Resumo month selector ────────────────────────────── */
+  .month-pills{
+    display:flex; gap:6px; overflow-x:auto; padding-bottom:4px;
+    -webkit-overflow-scrolling:touch; scrollbar-width:none;
+  }
+  .month-pills::-webkit-scrollbar{display:none;}
+  .month-pill{
+    flex-shrink:0; padding:6px 14px; border-radius:20px;
+    border:1px solid var(--border-strong); background:var(--card);
+    color:var(--muted); font-size:12px; font-weight:500;
+    cursor:pointer; font-family:inherit; transition:all .15s;
+  }
+  .month-pill.active{
+    background:var(--accent); color:#fff; border-color:var(--accent);
+  }
+  /* Bar chart */
+  .chart-wrap{display:flex; align-items:flex-end; gap:4px; padding:4px 4px 0;}
+  .chart-col{flex:1; display:flex; flex-direction:column; align-items:center; gap:4px; cursor:pointer;}
+  .chart-bar-el{width:100%; border-radius:4px 4px 0 0; min-height:3px; transition:background .2s;}
+  .chart-label-el{font-size:9px; color:var(--muted2); white-space:nowrap;}
+  /* Ranking bar */
+  .rank-bar-bg{height:4px; background:var(--border); border-radius:2px; overflow:hidden; margin-top:5px;}
+  .rank-bar-fg{height:100%; background:var(--accent); border-radius:2px; transition:width .3s;}
+  /* Birthday indicator dot */
+  #birthday-dot{display:none; position:absolute; top:2px; right:2px; width:8px; height:8px; border-radius:50%; background:#E65100; border:1.5px solid var(--ink);}
+  #birthday-dot.show{display:block;}
+
+  /* ── Recompra (previsão de recompra) ──── */
+  /* Badges de status do ciclo de recompra */
+  .badge-recente{background:#E7EFE3; color:#3E5941;}     /* 🟢 compra recente */
+  .badge-proxima{background:#FBF3E0; color:#8A5A16;}     /* 🟡 próxima recompra */
+  .badge-acabando{background:#FDE8D5; color:#B4560E;}    /* 🟠 estoque acabando */
+  .badge-atrasada{background:var(--danger-bg); color:var(--danger-text);} /* 🔴 recompra atrasada */
+  .badge-semprev{background:var(--surface); color:var(--muted2); border:1px solid var(--border-strong);}
+  /* Destaque "PRÓXIMA RECOMPRA" na ficha do cliente */
+  .recompra-highlight{
+    border-radius:12px; padding:12px 14px; margin-bottom:10px;
+    border:1px solid var(--border-strong); background:var(--surface);
+    display:flex; align-items:center; justify-content:space-between; gap:10px;
+  }
+  .recompra-highlight .rh-label{font-size:10px; font-weight:600; letter-spacing:.06em; text-transform:uppercase; color:var(--muted2);}
+  .recompra-highlight .rh-date{font-size:18px; font-weight:600; font-family:'Fraunces',serif;}
+  .recompra-highlight.is-atrasada{background:var(--danger-bg); border-color:#E4B3A6;}
+  .recompra-highlight.is-acabando{background:#FDE8D5; border-color:#F0C9A3;}
+  .recompra-highlight.is-proxima{background:var(--warn-bg); border-color:var(--warn-border);}
+  /* Barra de confiabilidade */
+  .conf-wrap{display:flex; align-items:center; gap:6px; font-size:11px; color:var(--muted2);}
+  .conf-bar{width:46px; height:5px; border-radius:3px; background:var(--border); overflow:hidden;}
+  .conf-fill{height:100%; border-radius:3px;}
+  .conf-alta{background:#4C6B4F;} .conf-media{background:#C9922B;} .conf-baixa{background:#B5432E;}
+  /* Linha de detalhe (chave/valor) das previsões */
+  .rc-detail{display:flex; justify-content:space-between; gap:8px; font-size:13px; padding:3px 0; color:var(--muted);}
+  .rc-detail b{color:var(--ink); font-weight:500;}
+  /* Filtros da central de recompras */
+  .rc-filter-pills{display:flex; gap:6px; overflow-x:auto; padding-bottom:4px; -webkit-overflow-scrolling:touch; scrollbar-width:none;}
+  .rc-filter-pills::-webkit-scrollbar{display:none;}
+  .rc-pill{flex-shrink:0; padding:6px 12px; border-radius:20px; border:1px solid var(--border-strong); background:var(--card); color:var(--muted); font-size:12px; font-weight:500; cursor:pointer; font-family:inherit; transition:all .15s;}
+  .rc-pill.active{background:var(--accent); color:#fff; border-color:var(--accent);}
+</style>
+</head>
+<body>
+
+<!-- ── Login Screen ───────────────────────────────────────── -->
+<div id="login-screen">
+  <div id="login-card">
+    <div id="login-icon">☕</div>
+    <h1 id="login-title">Estoque &amp; Vendas</h1>
+    <p id="login-sub">Entre com suas credenciais para acessar o sistema.</p>
+    <div id="login-fields">
+      <div>
+        <label class="field-label">Usuário</label>
+        <input id="login-user" type="text" placeholder="admin" autocomplete="username" />
+      </div>
+      <div>
+        <label class="field-label">Senha</label>
+        <input id="login-pass" type="password" placeholder="••••••••" autocomplete="current-password" />
+      </div>
+      <p id="login-error">Usuário ou senha incorretos. Tente novamente.</p>
+      <button id="login-btn">Entrar →</button>
+    </div>
+    <p id="login-footer">Café — Sistema interno de controle</p>
+  </div>
+</div>
+
+<!-- ── App ───────────────────────────────────────────────── -->
+<div id="app">
+  <header>
+    <div class="header-left">
+      <h1>☕ Estoque &amp; Vendas</h1>
+      <p><span id="sync-indicator"><span class="sync-dot off"></span>conectando...</span></p>
+    </div>
+    <div style="display:flex;align-items:center;gap:4px;">
+      <button id="btn-birthday" title="Aniversariantes de hoje" style="position:relative;background:none;border:none;color:#C9B896;cursor:pointer;font-size:18px;padding:4px;opacity:.85;">
+        🎂<span id="birthday-dot"></span>
+      </button>
+      <button id="btn-logout" title="Sair">⎋</button>
+    </div>
+  </header>
+  <nav id="tabs">
+    <button data-tab="estoque" class="active">Estoque</button>
+    <button data-tab="pedidos">Pedidos</button>
+    <button data-tab="clientes">Clientes</button>
+    <button data-tab="recompras">Recompras</button>
+    <button data-tab="receber">A Receber</button>
+    <button data-tab="resumo">Resumo</button>
+    <button data-tab="vendedores">Vendedores</button>
+  </nav>
+  <main id="main"></main>
+</div>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
+<script type="module" src="https://static.cloudflareinsights.com/beacon.min.js/v4513226cdae34746b4dedf0b4dfa099e1781791509496" integrity="sha512-ZE9pZaUXND66v380QUtch/5sE9tPFh2zg45pR2PB0CVkCtOREv2AJKkSidISWkysEuQ0EH8faUU5du78bx87UQ==" data-cf-beacon='{"version":"2024.11.0","token":"f0f03d0605bf45f1a3b17cf7d5e6861f"}' crossorigin="anonymous"></script>
+<script type="module" src="https://static.cloudflareinsights.com/beacon.min.js/v4513226cdae34746b4dedf0b4dfa099e1781791509496" integrity="sha512-ZE9pZaUXND66v380QUtch/5sE9tPFh2zg45pR2PB0CVkCtOREv2AJKkSidISWkysEuQ0EH8faUU5du78bx87UQ==" data-cf-beacon='{"version":"2024.11.0","token":"f0f03d0605bf45f1a3b17cf7d5e6861f"}' crossorigin="anonymous"></script>
+</body>
+</html>
