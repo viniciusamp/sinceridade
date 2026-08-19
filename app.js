@@ -48,13 +48,11 @@ let configOk = window.SUPABASE_URL && window.SUPABASE_ANON_KEY &&
 
 let state = {
   tab: "estoque", products: [], sales: [], clients: [], sellers: [], cart: [],
-  receivables: [], receivablePayments: [], recompraContacts: [], orderDeliveries: [], stockEntries: [],
-  loading: true, loadError: null,
+  receivables: [], receivablePayments: [], recompraContacts: [], orderDeliveries: [],
+  presetProductId: null, loading: true, loadError: null,
   resumoMonth: todayISOMonthPrefix(),
   recompraFilter: { window: "7", clientId: "", productName: "", status: "" },
-  pedidosPaymentFilter: "todos", pedidosDeliveryFilter: "todos",
-  movPeriod: "hoje", movProduct: "", movUser: "", movLocation: "", movType: "todos",
-  movCustomFrom: "", movCustomTo: "",
+  pedidosFilter: "todos",
 };
 
 // ===================================================================
@@ -328,10 +326,6 @@ async function loadAll() {
   const { data: orderDeliveries, error: e8 } = await db
     .from("order_deliveries").select("*").order("created_at", { ascending: false });
   if (e8) { console.warn("order_deliveries indisponível (rode o supabase-schema.sql):", e8.message); }
-  // Movimentações de estoque (entrada/saída).
-  const { data: stockEntries, error: e9 } = await db
-    .from("stock_entries").select("*").order("entered_at", { ascending: false });
-  if (e9) { console.warn("stock_entries indisponível (rode o supabase-schema.sql):", e9.message); }
   state.loadError = null;
   state.products = products || [];
   state.sales = sales || [];
@@ -341,7 +335,6 @@ async function loadAll() {
   state.receivablePayments = receivablePayments || [];
   state.recompraContacts = recompraContacts || [];
   state.orderDeliveries = orderDeliveries || [];
-  state.stockEntries = stockEntries || [];
   state.loading = false;
   render();
   updateBirthdayDot();
@@ -358,7 +351,6 @@ function subscribeRealtime() {
     .on("postgres_changes", { event: "*", schema: "public", table: "receivable_payments" }, loadAll)
     .on("postgres_changes", { event: "*", schema: "public", table: "recompra_contacts" }, loadAll)
     .on("postgres_changes", { event: "*", schema: "public", table: "order_deliveries" }, loadAll)
-    .on("postgres_changes", { event: "*", schema: "public", table: "stock_entries" }, loadAll)
     .subscribe((status) => {
       const label = $("#sync-indicator");
       if (!label) return;
@@ -388,30 +380,6 @@ async function updateProduct(id, data) {
 }
 async function deleteProduct(id) { await db.from("products").delete().eq("id", id); }
 
-async function logStockMovement({ productId, productName, unit, movementType, quantity, location, orderKey, reason, note, loggedBy, unitCost }) {
-  await db.from("stock_entries").insert({
-    product_id: productId || null, product_name: productName, unit: unit || null,
-    quantity: Math.abs(Number(quantity) || 0),
-    unit_cost: Number(unitCost) || 0, total_cost: (Number(unitCost) || 0) * Math.abs(Number(quantity) || 0),
-    note: note || null, logged_by: loggedBy || null,
-    movement_type: movementType, location: location || null, order_key: orderKey || null, reason: reason || null,
-  });
-}
-
-async function registerStockEntry({ product, quantity, location, unitCost, reason, note, loggedBy }) {
-  const col = location === "bh" ? "qty_bh" : "qty_mhu";
-  const nextVal = Number((Number(product[col] || 0) + Number(quantity)).toFixed(3));
-  const otherCol = location === "bh" ? "qty_mhu" : "qty_bh";
-  await db.from("products").update({
-    [col]: nextVal, quantity: Number((nextVal + Number(product[otherCol] || 0)).toFixed(3)),
-  }).eq("id", product.id);
-  await logStockMovement({
-    productId: product.id, productName: product.name, unit: product.unit,
-    movementType: "entrada", quantity, location: locName(location),
-    reason: reason || "Compra de fornecedor", note, loggedBy, unitCost,
-  });
-}
-
 async function adjustQty(product, delta, location) {
   const col = location === "bh" ? "qty_bh" : "qty_mhu";
   const current = Number(product[col] || 0);
@@ -420,11 +388,6 @@ async function adjustQty(product, delta, location) {
   const otherCol = location === "bh" ? "qty_mhu" : "qty_bh";
   patch.quantity = Number((nextVal + Number(product[otherCol] || 0)).toFixed(3));
   await db.from("products").update(patch).eq("id", product.id);
-  await logStockMovement({
-    productId: product.id, productName: product.name, unit: product.unit,
-    movementType: delta > 0 ? "entrada" : "saida", quantity: 1, location: locName(location),
-    reason: "Ajuste rápido (+/-)", loggedBy: localStorage.getItem("cafe_app_last_stock_user") || null,
-  });
 }
 
 async function registerSale(product, qty, { paymentMethod, discount, location, clientId, clientName, sellerId, sellerName, saleGroupId }) {
@@ -446,11 +409,6 @@ async function registerSale(product, qty, { paymentMethod, discount, location, c
     [col]: nextVal,
     quantity: Number((nextVal + Number(product[otherCol] || 0)).toFixed(3)),
   }).eq("id", product.id);
-  await logStockMovement({
-    productId: product.id, productName: product.name, unit: product.unit,
-    movementType: "saida", quantity: qty, location: locName(location),
-    orderKey: saleGroupId || null, reason: "Venda", loggedBy: sellerName || null,
-  });
 }
 
 async function deleteSale(sale) {
@@ -466,11 +424,6 @@ async function deleteSale(sale) {
       quantity: Number((nextVal + Number(prod[otherCol] || 0)).toFixed(3)),
     }).eq("id", prod.id);
   }
-  // Remove a movimentação de saída correspondente, pra não deixar um
-  // registro fantasma no livro-caixa de estoque referente a uma venda que
-  // não existe mais.
-  await db.from("stock_entries").delete()
-    .eq("order_key", saleOrderKey(sale)).eq("product_id", sale.product_id).eq("movement_type", "saida");
 }
 
 // ---- Contas a receber ----
@@ -509,11 +462,10 @@ function receivableStatusLabel(status) {
 
 // ---- Clientes ----
 async function addClient(data) {
-  const { data: row } = await db.from("clients").insert({
+  await db.from("clients").insert({
     first_name: data.firstName, last_name: data.lastName,
     phone: data.phone, city: data.city, birthday: data.birthday || null,
-  }).select().single();
-  return row;
+  });
 }
 async function updateClient(id, data) {
   await db.from("clients").update({
@@ -721,11 +673,11 @@ function render() {
   }
   $$("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === state.tab));
   if (state.tab === "estoque") renderEstoque();
+  if (state.tab === "vendas") renderVendas();
   if (state.tab === "clientes") renderClientes();
   if (state.tab === "recompras") renderRecompras();
   if (state.tab === "receber") renderContasReceber();
   if (state.tab === "pedidos") renderPedidos();
-  if (state.tab === "movimentacoes") renderMovimentacoes();
   if (state.tab === "vendedores") renderVendedores();
   if (state.tab === "resumo") renderResumo();
   updateBirthdayDot();
@@ -840,7 +792,7 @@ function renderEstoque() {
     $(".btn-plus-mhu", card).onclick = () => adjustQty(product, 1, "mhu");
     $(".btn-minus-bh", card).onclick = () => adjustQty(product, -1, "bh");
     $(".btn-plus-bh", card).onclick = () => adjustQty(product, 1, "bh");
-    $(".btn-vender", card).onclick = () => openNewOrderModal({ presetProductId: id });
+    $(".btn-vender", card).onclick = () => { state.presetProductId = id; state.tab = "vendas"; render(); };
   });
 }
 
@@ -944,131 +896,55 @@ function openProductModal(product) {
 }
 
 // ---- Vendas ----
-function openNewOrderModal(opts = {}) {
-  if (!state.products.length) { alert("Cadastre um produto no estoque antes de criar um pedido."); return; }
-  state.cart = opts.presetProductId ? [{ productId: opts.presetProductId, qty: 1 }] : [];
-  if (!state.cart.length) state.cart = [{ productId: state.products[0].id, qty: 1 }];
-
-  const backdrop = document.createElement("div");
-  backdrop.className = "modal-backdrop";
-  backdrop.innerHTML = `<div class="modal" id="order-modal-body" style="max-width:460px;"></div>`;
-  document.body.appendChild(backdrop);
-  backdrop.onclick = (e) => { if (e.target === backdrop) { state.cart = []; backdrop.remove(); } };
-
-  let selectedClientId = "avista";
-
-  const recalc = () => {
-    const total = state.cart.reduce((sum, item) => {
-      const p = state.products.find((x) => x.id === item.productId);
-      return sum + (p ? p.price * item.qty : 0);
-    }, 0);
-    const disc = Number($("#o-discount", backdrop)?.value) || 0;
-    $("#o-subtotal", backdrop) && ($("#o-subtotal", backdrop).textContent = money(total));
-    $("#o-total", backdrop) && ($("#o-total", backdrop).textContent = money(Math.max(0, total - disc)));
-  };
-
-  function wire() {
-    $("#modal-close", backdrop).onclick = () => { state.cart = []; backdrop.remove(); };
-    $("#o-client", backdrop).onchange = (e) => { selectedClientId = e.target.value; };
-    $("#o-new-client", backdrop).onclick = () => {
-      openQuickClientModal((client) => { selectedClientId = client.id; paint(); });
-    };
-    $("#o-add-item", backdrop).onclick = () => { state.cart.push({ productId: state.products[0].id, qty: 1 }); paint(); };
-    $$(".cart-product", backdrop).forEach((sel) => {
-      sel.onchange = () => { state.cart[Number(sel.closest(".cart-row").dataset.idx)].productId = sel.value; paint(); };
-    });
-    $$(".cart-qty", backdrop).forEach((inp) => {
-      inp.oninput = () => { state.cart[Number(inp.closest(".cart-row").dataset.idx)].qty = Number(inp.value) || 0; recalc(); };
-    });
-    $$(".cart-remove", backdrop).forEach((btn) => {
-      btn.onclick = () => { state.cart.splice(Number(btn.dataset.idx), 1); paint(); };
-    });
-    $("#o-discount", backdrop).oninput = recalc;
-
-    $("#o-register", backdrop).onclick = async () => {
-      const products = state.products;
-      const loc = $("#o-location", backdrop).value;
-      const clientId = $("#o-client", backdrop).value;
-      const client = clientId !== "avista" ? state.clients.find((c) => c.id === clientId) : null;
-      const clientName = client ? `${client.first_name} ${client.last_name || ""}`.trim() : "Cliente à vista";
-      const sellerId = $("#o-seller", backdrop).value || null;
-      const seller = sellerId ? state.sellers.find((v) => v.id === sellerId) : null;
-      const sellerName = seller ? seller.name : null;
-      const disc = Number($("#o-discount", backdrop).value) || 0;
-      const validItems = state.cart.filter((i) => i.qty > 0 && products.find((p) => p.id === i.productId));
-      if (!validItems.length) return;
-
-      const cartTotalNow = state.cart.reduce((sum, item) => {
-        const p = products.find((x) => x.id === item.productId);
-        return sum + (p ? p.price * item.qty : 0);
-      }, 0);
-
-      const saleGroupId = crypto.randomUUID();
-      let remainingDisc = disc;
-      const itemsForMsg = [];
-      for (const item of validItems) {
-        const p = products.find((x) => x.id === item.productId);
-        const itemDisc = validItems.length === 1 ? disc : Math.min(remainingDisc, p.price * item.qty);
-        remainingDisc -= itemDisc;
-        await registerSale(p, item.qty, {
-          paymentMethod: $("#o-payment", backdrop).value, discount: itemDisc, location: loc,
-          clientId: client ? client.id : null, clientName,
-          sellerId, sellerName, saleGroupId,
-        });
-        itemsForMsg.push({ ...p, qty: item.qty });
-      }
-      const finalTotal = Math.max(0, cartTotalNow - disc);
-      if ($("#o-payment", backdrop).value === "prazo") {
-        await createReceivable({ saleGroupId, clientId: client ? client.id : null, clientName, amount: finalTotal });
-      }
-      state.cart = [];
-      backdrop.remove();
-      showThankYouMessage(clientName, itemsForMsg, finalTotal);
-      renderPedidos();
-    };
+function renderVendas() {
+  const products = state.products;
+  if (!state.cart.length && state.presetProductId) {
+    state.cart.push({ productId: state.presetProductId, qty: 1 });
   }
+  state.presetProductId = null;
 
-  function paint() {
-    const products = state.products;
-    const cartTotal = state.cart.reduce((sum, item) => {
-      const p = products.find((x) => x.id === item.productId);
-      return sum + (p ? p.price * item.qty : 0);
-    }, 0);
-    const clientOptions = `
-      <option value="avista">Cliente à vista (sem cadastro)</option>
-      ${state.clients.map((c) => `<option value="${c.id}" ${c.id === selectedClientId ? "selected" : ""}>${escapeHtml(c.first_name)} ${escapeHtml(c.last_name || "")}</option>`).join("")}
-    `;
-    const sellerOptions = `
-      <option value="">Sem vendedor</option>
-      ${state.sellers.map((v) => `<option value="${v.id}">${escapeHtml(v.name)}</option>`).join("")}
-    `;
-    $("#order-modal-body", backdrop).innerHTML = `
-      <div class="row" style="margin-bottom:16px;">
-        <h3 class="serif" style="margin:0;font-size:17px;">Novo pedido</h3>
-        <button class="icon-btn" id="modal-close">✕</button>
-      </div>
+  const grouped = {};
+  state.sales.forEach((s) => { const d = s.sold_at.slice(0, 10); (grouped[d] = grouped[d] || []).push(s); });
+  const days = Object.entries(grouped).sort((a, b) => (a[0] < b[0] ? 1 : -1));
+
+  const cartTotal = state.cart.reduce((sum, item) => {
+    const p = products.find((x) => x.id === item.productId);
+    return sum + (p ? p.price * item.qty : 0);
+  }, 0);
+
+  const clientOptions = `
+    <option value="avista">Cliente à vista (sem cadastro)</option>
+    ${state.clients.map((c) => `<option value="${c.id}">${escapeHtml(c.first_name)} ${escapeHtml(c.last_name || "")}</option>`).join("")}
+  `;
+
+  const sellerOptions = `
+    <option value="">Sem vendedor</option>
+    ${state.sellers.map((v) => `<option value="${v.id}">${escapeHtml(v.name)}</option>`).join("")}
+  `;
+
+  $("#main").innerHTML = `
+    <div class="card" style="margin-bottom:20px;">
+      <p style="font-size:13px;font-weight:500;color:var(--muted);margin:0 0 10px;">Registrar venda</p>
+      ${products.length === 0 ? `<p style="font-size:13px;color:var(--muted2);">Cadastre um produto no estoque para começar a vender.</p>` : `
       <div style="display:flex;flex-direction:column;gap:10px;">
         <div>
           <label class="field-label">Cliente</label>
-          <div style="display:flex;gap:6px;">
-            <select id="o-client" style="flex:1;">${clientOptions}</select>
-            <button class="btn" id="o-new-client" type="button" style="flex-shrink:0;">+ Novo</button>
-          </div>
+          <select id="v-client">${clientOptions}</select>
         </div>
         <div>
           <label class="field-label">Vendedor</label>
-          <select id="o-seller">${sellerOptions}</select>
+          <select id="v-seller">${sellerOptions}</select>
         </div>
         <div>
           <label class="field-label">Localidade (de qual estoque sai)</label>
-          <select id="o-location">
+          <select id="v-location">
             <option value="mhu">Manhuaçu</option>
             <option value="bh">BH</option>
           </select>
         </div>
         <div>
-          <label class="field-label">Itens do pedido</label>
-          <div id="o-cart-list">
+          <label class="field-label">Itens da venda</label>
+          <div id="cart-list">
             ${state.cart.map((item, idx) => {
               const p = products.find((x) => x.id === item.productId);
               return `
@@ -1082,63 +958,132 @@ function openNewOrderModal(opts = {}) {
                 </div>`;
             }).join("") || `<p style="font-size:13px;color:var(--muted2);">Nenhum item adicionado.</p>`}
           </div>
-          <button class="btn" id="o-add-item" type="button" style="margin-top:8px;width:100%;">+ Adicionar produto</button>
+          <button class="btn" id="btn-add-item" style="margin-top:8px;width:100%;">+ Adicionar produto</button>
         </div>
         <div class="grid2">
-          <div><label class="field-label">Desconto (R$)</label><input id="o-discount" type="number" min="0" step="any" value="0" /></div>
+          <div>
+            <label class="field-label">Desconto (R$)</label>
+            <input id="v-discount" type="number" min="0" step="any" value="0" />
+          </div>
           <div>
             <label class="field-label">Forma de pagamento</label>
-            <select id="o-payment">
+            <select id="v-payment">
               ${PAYMENT_METHODS.map((m) => `<option value="${m.value}" ${m.value === "dinheiro" ? "selected" : ""}>${m.label}</option>`).join("")}
             </select>
           </div>
         </div>
         <div class="sale-totals">
-          <div class="row"><span>Subtotal</span><span class="mono" id="o-subtotal">${money(cartTotal)}</span></div>
-          <div class="row" style="font-weight:600;"><span>Total</span><span class="mono" id="o-total">${money(cartTotal)}</span></div>
+          <div class="row"><span>Subtotal</span><span class="mono" id="v-subtotal">${money(cartTotal)}</span></div>
+          <div class="row" style="font-weight:600;"><span>Total</span><span class="mono" id="v-total">${money(cartTotal)}</span></div>
         </div>
-        <button class="btn btn-accent" id="o-register" ${!state.cart.length ? "disabled" : ""}>Registrar pedido</button>
-      </div>`;
-    wire();
-  }
+        <button class="btn btn-accent" id="v-register" ${!state.cart.length ? "disabled" : ""}>Registrar venda</button>
+      </div>`}
+    </div>
 
-  paint();
-}
-
-function openQuickClientModal(onCreated) {
-  const backdrop = document.createElement("div");
-  backdrop.className = "modal-backdrop";
-  backdrop.style.zIndex = "60";
-  backdrop.innerHTML = `
-    <div class="modal">
-      <div class="row" style="margin-bottom:16px;">
-        <h3 class="serif" style="margin:0;font-size:17px;">Novo cliente</h3>
-        <button class="icon-btn" id="modal-close">✕</button>
-      </div>
-      <p style="font-size:12px;color:var(--muted);margin:0 0 4px;">Cadastro rápido — dá pra completar os outros dados depois na aba Clientes.</p>
-      <div style="display:flex;flex-direction:column;gap:14px;">
-        <div><label class="field-label">Nome</label><input id="qc-name" placeholder="Nome do cliente" /></div>
-        <div><label class="field-label">Telefone</label><input id="qc-phone" placeholder="(00) 00000-0000" /></div>
-        <div style="display:flex;gap:8px;margin-top:6px;">
-          <button class="btn" id="modal-cancel" style="flex:1;">Cancelar</button>
-          <button class="btn btn-accent" id="modal-save" style="flex:1;">Salvar</button>
-        </div>
-      </div>
+    <p style="font-size:13px;font-weight:500;color:var(--muted);margin:0 0 8px;">Histórico</p>
+    ${days.length === 0 ? `<p style="text-align:center;font-size:13px;color:var(--muted2);padding:24px 0;">Nenhuma venda registrada ainda.</p>` : ""}
+    <div style="display:flex;flex-direction:column;gap:16px;">
+      ${days.map(([date, list]) => {
+        const dayTotal = list.reduce((s, x) => s + Number(x.total), 0);
+        const label = date === todayISO() ? "Hoje" : new Date(date + "T00:00:00").toLocaleDateString("pt-BR", { day: "2-digit", month: "long" });
+        return `
+          <div>
+            <div class="row" style="margin-bottom:6px;">
+              <span style="font-size:11px;font-weight:500;color:var(--muted2);text-transform:uppercase;">${label}</span>
+              <span class="mono" style="font-size:12px;color:var(--muted);">${money(dayTotal)}</span>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:6px;">
+              ${list.map((s) => `
+                <div class="card row" data-id="${s.id}" style="padding:9px 12px;">
+                  <div style="min-width:0;">
+                    <p style="margin:0;font-size:14px;">${escapeHtml(s.product_name)} ${s.client_name ? "· " + escapeHtml(s.client_name) : ""}</p>
+                    <p style="margin:0;font-size:12px;color:var(--muted2);">${s.quantity} ${s.unit || ""} × ${money(s.unit_price)}</p>
+                    <div style="display:flex;align-items:center;gap:6px;margin-top:4px;flex-wrap:wrap;">
+                      <span class="badge ${paymentCls(s.payment_method)}">${paymentLabel(s.payment_method)}</span>
+                      <span class="badge badge-loc">${escapeHtml(s.location || "Manhuaçu")}</span>
+                      ${s.seller_name ? `<span class="badge badge-loc">👤 ${escapeHtml(s.seller_name)}</span>` : ""}
+                    </div>
+                  </div>
+                  <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
+                    <span class="mono" style="font-size:14px;">${money(s.total)}</span>
+                    <button class="icon-btn danger btn-del-sale" title="Remover">🗑</button>
+                  </div>
+                </div>`).join("")}
+            </div>
+          </div>`;
+      }).join("")}
     </div>`;
-  document.body.appendChild(backdrop);
-  backdrop.onclick = (e) => { if (e.target === backdrop) backdrop.remove(); };
-  $("#modal-close", backdrop).onclick = () => backdrop.remove();
-  $("#modal-cancel", backdrop).onclick = () => backdrop.remove();
-  $("#qc-name", backdrop).focus();
-  $("#modal-save", backdrop).onclick = async () => {
-    const firstName = $("#qc-name", backdrop).value.trim();
-    const phone = $("#qc-phone", backdrop).value.trim();
-    if (!firstName) return;
-    const client = await addClient({ firstName, lastName: "", phone, city: "", birthday: "" });
-    if (client && !state.clients.find((c) => c.id === client.id)) state.clients.push(client);
-    backdrop.remove();
-    onCreated && onCreated(client);
+
+  if (!products.length) return;
+
+  const recalc = () => {
+    const total = state.cart.reduce((sum, item) => {
+      const p = products.find((x) => x.id === item.productId);
+      return sum + (p ? p.price * item.qty : 0);
+    }, 0);
+    const disc = Number($("#v-discount")?.value) || 0;
+    $("#v-subtotal") && ($("#v-subtotal").textContent = money(total));
+    $("#v-total") && ($("#v-total").textContent = money(Math.max(0, total - disc)));
   };
+
+  $("#btn-add-item") && ($("#btn-add-item").onclick = () => {
+    if (products[0]) state.cart.push({ productId: products[0].id, qty: 1 });
+    renderVendas();
+  });
+  $$(".cart-product", $("#main")).forEach((sel) => {
+    sel.onchange = () => { state.cart[sel.closest(".cart-row").dataset.idx].productId = sel.value; renderVendas(); };
+  });
+  $$(".cart-qty", $("#main")).forEach((inp) => {
+    inp.oninput = () => { state.cart[inp.closest(".cart-row").dataset.idx].qty = Number(inp.value) || 0; recalc(); };
+  });
+  $$(".cart-remove", $("#main")).forEach((btn) => {
+    btn.onclick = () => { state.cart.splice(Number(btn.dataset.idx), 1); renderVendas(); };
+  });
+  $("#v-discount") && ($("#v-discount").oninput = recalc);
+
+  $("#v-register") && ($("#v-register").onclick = async () => {
+    const loc = $("#v-location").value;
+    const clientId = $("#v-client").value;
+    const client = clientId !== "avista" ? state.clients.find((c) => c.id === clientId) : null;
+    const clientName = client ? `${client.first_name} ${client.last_name || ""}`.trim() : "Cliente à vista";
+    const sellerId = $("#v-seller").value || null;
+    const seller = sellerId ? state.sellers.find((v) => v.id === sellerId) : null;
+    const sellerName = seller ? seller.name : null;
+    const disc = Number($("#v-discount").value) || 0;
+    const validItems = state.cart.filter((i) => i.qty > 0 && products.find((p) => p.id === i.productId));
+    if (!validItems.length) return;
+
+    const saleGroupId = crypto.randomUUID();
+    let remainingDisc = disc;
+    const itemsForMsg = [];
+    for (const item of validItems) {
+      const p = products.find((x) => x.id === item.productId);
+      const itemDisc = validItems.length === 1 ? disc : Math.min(remainingDisc, p.price * item.qty);
+      remainingDisc -= itemDisc;
+      await registerSale(p, item.qty, {
+        paymentMethod: $("#v-payment").value, discount: itemDisc, location: loc,
+        clientId: client ? client.id : null, clientName,
+        sellerId, sellerName, saleGroupId,
+      });
+      itemsForMsg.push({ ...p, qty: item.qty });
+    }
+    const finalTotal = Math.max(0, cartTotal - disc);
+    if ($("#v-payment").value === "prazo") {
+      await createReceivable({
+        saleGroupId, clientId: client ? client.id : null, clientName, amount: finalTotal,
+      });
+    }
+    showThankYouMessage(clientName, itemsForMsg, finalTotal);
+    state.cart = [];
+  });
+
+  $$(".btn-del-sale", $("#main")).forEach((btn) => {
+    btn.onclick = async () => {
+      const card = btn.closest(".card");
+      const sale = state.sales.find((s) => s.id === card.dataset.id);
+      if (sale) await deleteSale(sale);
+    };
+  });
 }
 
 function showThankYouMessage(clientName, items, total) {
@@ -1162,7 +1107,7 @@ Obrigado pela confiança e aproveite seu café!`;
   backdrop.innerHTML = `
     <div class="modal">
       <div class="row" style="margin-bottom:16px;">
-        <h3 class="serif" style="margin:0;font-size:17px;">Pedido registrado ✅</h3>
+        <h3 class="serif" style="margin:0;font-size:17px;">Venda registrada ✅</h3>
         <button class="icon-btn" id="ty-close">✕</button>
       </div>
       <p style="font-size:13px;color:var(--muted);margin:0 0 8px;">Mensagem para ${escapeHtml(clientName)}:</p>
@@ -1748,16 +1693,12 @@ function computeOrders() {
     .map((g) => {
       const delivery = state.orderDeliveries.find((d) => d.order_key === g.orderKey);
       const receivable = g.paymentMethod === "prazo" ? state.receivables.find((r) => r.sale_group_id === g.orderKey) : null;
-      // Status binário, do jeito que a tela de Pedidos mostra: pago/pendente.
-      // Vendas à vista (pix/dinheiro/cartão) já nascem pagas. Vendas à prazo
-      // seguem o status da conta a receber vinculada (mesma estrutura de sempre).
-      const paymentStatus = g.paymentMethod !== "prazo" ? "pago" : (receivable && receivable.status === "pago" ? "pago" : "pendente");
       return {
         ...g,
         statusDelivery: delivery ? delivery.status_delivery : "pendente",
         deliveredAt: delivery ? delivery.delivered_at : null,
         deliveredBy: delivery ? delivery.delivered_by : null,
-        receivable, paymentStatus,
+        receivable,
       };
     })
     .sort((a, b) => (a.soldAt < b.soldAt ? 1 : -1));
@@ -1778,73 +1719,54 @@ async function markOrderPending(order) {
   if (existing) await db.from("order_deliveries").update({ status_delivery: "pendente", delivered_at: null, delivered_by: null }).eq("id", existing.id);
 }
 
-async function deleteOrder(order) {
-  for (const item of order.items) await deleteSale(item);
-  if (order.receivable) await db.from("receivables").delete().eq("id", order.receivable.id);
-  const delivery = state.orderDeliveries.find((d) => d.order_key === order.orderKey);
-  if (delivery) await db.from("order_deliveries").delete().eq("id", delivery.id);
-}
-
-function orderNumber(orderKey) { return String(orderKey).replace(/-/g, "").slice(0, 6).toUpperCase(); }
-
 function renderPedidos() {
   const all = computeOrders();
-  const payFilters = { todos: () => true, pagos: (o) => o.paymentStatus === "pago", pendentes: (o) => o.paymentStatus === "pendente" };
-  const delFilters = { todos: () => true, entregues: (o) => o.statusDelivery === "entregue", pendentes: (o) => o.statusDelivery === "pendente" };
-  const list = all.filter(payFilters[state.pedidosPaymentFilter]).filter(delFilters[state.pedidosDeliveryFilter]);
+  const filters = {
+    todos: () => true,
+    entrega_pendente: (o) => o.statusDelivery === "pendente",
+    entregues: (o) => o.statusDelivery === "entregue",
+    pagamento_pendente: (o) => o.receivable && o.receivable.status !== "pago",
+  };
+  const list = all.filter(filters[state.pedidosFilter] || filters.todos);
 
-  const payLabel = { todos: "Todos", pagos: "Pagos", pendentes: "Pendentes" };
-  const delLabel = { todos: "Todos", entregues: "Entregues", pendentes: "Pendentes" };
+  const pillLabel = { todos: "Todos", entrega_pendente: "Entrega pendente", entregues: "Entregues", pagamento_pendente: "Pagamento pendente" };
 
   $("#main").innerHTML = `
-    <button class="btn btn-dark" id="btn-new-order" style="width:100%;margin-bottom:20px;">+ Novo Pedido</button>
-
-    <p style="font-size:11px;font-weight:600;color:var(--muted2);text-transform:uppercase;letter-spacing:.04em;margin:0 0 6px;">Pagamento</p>
-    <div class="rc-filter-pills" style="margin-bottom:12px;">
-      ${Object.keys(payLabel).map((k) => `<button class="rc-pill pay-pill ${state.pedidosPaymentFilter === k ? "active" : ""}" data-filter="${k}">${payLabel[k]}</button>`).join("")}
+    <div class="rc-filter-pills" style="margin-bottom:16px;">
+      ${Object.keys(pillLabel).map((k) => `<button class="rc-pill ${state.pedidosFilter === k ? "active" : ""}" data-filter="${k}">${pillLabel[k]}</button>`).join("")}
     </div>
-    <p style="font-size:11px;font-weight:600;color:var(--muted2);text-transform:uppercase;letter-spacing:.04em;margin:0 0 6px;">Entrega</p>
-    <div class="rc-filter-pills" style="margin-bottom:18px;">
-      ${Object.keys(delLabel).map((k) => `<button class="rc-pill del-pill ${state.pedidosDeliveryFilter === k ? "active" : ""}" data-filter="${k}">${delLabel[k]}</button>`).join("")}
-    </div>
-
     ${list.length === 0 ? `<div class="empty">Nenhum pedido nessa condição.</div>` : `
       <div style="display:flex;flex-direction:column;gap:10px;">
         ${list.map((o) => {
           const itemsSummary = o.items.map((it) => `${it.quantity}× ${escapeHtml(it.product_name)}`).join(", ");
-          const payOk = o.paymentStatus === "pago";
-          const delOk = o.statusDelivery === "entregue";
-          const paymentExtra = o.paymentMethod === "prazo" && o.receivable && o.receivable.status === "parcial"
-            ? ` <span style="color:var(--muted2);font-weight:400;">(pago ${money(o.receivable.paid_amount)} de ${money(o.receivable.amount)})</span>` : "";
+          const paymentBadge = o.paymentMethod === "prazo"
+            ? (o.receivable ? `<span class="badge badge-${o.receivable.status}">${receivableStatusLabel(o.receivable.status)}</span>` : `<span class="badge badge-prazo">À prazo</span>`)
+            : `<span class="badge ${paymentCls(o.paymentMethod)}">${paymentLabel(o.paymentMethod)}</span>`;
+          const deliveryBadge = o.statusDelivery === "entregue" ? `<span class="badge badge-ok">Entregue</span>` : `<span class="badge badge-low">Entrega pendente</span>`;
           return `
           <div class="card" data-key="${escapeHtml(o.orderKey)}">
             <div class="row" style="align-items:flex-start;">
               <div style="min-width:0;">
-                <p style="margin:0;font-size:11px;color:var(--muted2);">Pedido #${orderNumber(o.orderKey)} · ${new Date(o.soldAt).toLocaleDateString("pt-BR")}</p>
-                <p style="margin:2px 0 0;font-size:15px;font-weight:500;">${escapeHtml(o.clientName || "Cliente à vista")}</p>
-                <p style="margin:2px 0 0;font-size:12px;color:var(--muted2);">${escapeHtml(itemsSummary)}</p>
+                <p style="margin:0;font-size:15px;font-weight:500;">${escapeHtml(o.clientName || "Cliente à vista")}</p>
+                <p style="margin:2px 0 0;font-size:12px;color:var(--muted2);">${new Date(o.soldAt).toLocaleDateString("pt-BR")} · ${escapeHtml(itemsSummary)}</p>
               </div>
               <span class="mono" style="font-size:14px;flex-shrink:0;">${money(o.total)}</span>
             </div>
-            <div style="margin-top:10px;font-size:13px;display:flex;flex-direction:column;gap:3px;">
-              <span>Pagamento: ${payOk ? "🟢 Pago" : "🔴 Pendente"}${paymentExtra}</span>
-              <span>Entrega: ${delOk ? "🟢 Entregue" : "🔴 Pendente"}</span>
-            </div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;">${deliveryBadge} ${paymentBadge}</div>
             <div style="display:flex;gap:8px;margin-top:10px;">
-              ${delOk
+              ${o.statusDelivery === "entregue"
                 ? `<button class="btn btn-undo-delivery" style="flex:1;font-size:13px;">Desfazer entrega</button>`
                 : `<button class="btn btn-accent btn-deliver" style="flex:1;font-size:13px;">Confirmar entrega</button>`}
-              ${!payOk && o.receivable ? `<button class="btn btn-pay-order" style="flex:1;font-size:13px;">Quitar pagamento</button>` : ""}
-              <button class="icon-btn danger btn-del-order" title="Excluir pedido">🗑</button>
+              ${o.receivable && o.receivable.status !== "pago" ? `<button class="btn btn-pay-order" style="flex:1;font-size:13px;">Registrar pagamento</button>` : ""}
             </div>
           </div>`;
         }).join("")}
       </div>`}
   `;
 
-  $("#btn-new-order").onclick = () => openNewOrderModal();
-  $$(".pay-pill", $("#main")).forEach((btn) => { btn.onclick = () => { state.pedidosPaymentFilter = btn.dataset.filter; renderPedidos(); }; });
-  $$(".del-pill", $("#main")).forEach((btn) => { btn.onclick = () => { state.pedidosDeliveryFilter = btn.dataset.filter; renderPedidos(); }; });
+  $$(".rc-filter-pills button", $("#main")).forEach((btn) => {
+    btn.onclick = () => { state.pedidosFilter = btn.dataset.filter; renderPedidos(); };
+  });
   $$(".card[data-key]", $("#main")).forEach((card) => {
     const order = list.find((x) => String(x.orderKey) === card.dataset.key);
     const deliverBtn = $(".btn-deliver", card);
@@ -1853,11 +1775,6 @@ function renderPedidos() {
     if (undoBtn) undoBtn.onclick = async () => { await markOrderPending(order); };
     const payBtn = $(".btn-pay-order", card);
     if (payBtn) payBtn.onclick = () => openRegisterPaymentModal(order.receivable, () => renderPedidos());
-    $(".btn-del-order", card).onclick = async () => {
-      if (confirm(`Excluir o pedido #${orderNumber(order.orderKey)}? Isso remove a venda, devolve o estoque e apaga a conta a receber ligada a ele (se houver).`)) {
-        await deleteOrder(order);
-      }
-    };
   });
 }
 
@@ -1892,235 +1809,6 @@ function openMarkDeliveredModal(order) {
     await markOrderDelivered(order, { deliveredBy, note });
     backdrop.remove();
   };
-}
-
-// ---- Movimentações de estoque (entradas/saídas) ----
-const MOV_PERIODS = [
-  { id: "hoje", label: "Hoje" }, { id: "ontem", label: "Ontem" },
-  { id: "semana", label: "Semana" }, { id: "mes", label: "Mês" },
-  { id: "personalizado", label: "Período" }, { id: "todos", label: "Todos" },
-];
-
-function movPeriodRange() {
-  const now = new Date();
-  const startOfDay = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
-  const endOfDay = (d) => { const x = new Date(d); x.setHours(23, 59, 59, 999); return x; };
-  if (state.movPeriod === "hoje") return [startOfDay(now), endOfDay(now)];
-  if (state.movPeriod === "ontem") { const y = new Date(now); y.setDate(y.getDate() - 1); return [startOfDay(y), endOfDay(y)]; }
-  if (state.movPeriod === "semana") { const s = new Date(now); s.setDate(s.getDate() - 6); return [startOfDay(s), endOfDay(now)]; }
-  if (state.movPeriod === "mes") { const s = new Date(now.getFullYear(), now.getMonth(), 1); return [startOfDay(s), endOfDay(now)]; }
-  if (state.movPeriod === "personalizado" && state.movCustomFrom && state.movCustomTo) {
-    return [startOfDay(new Date(state.movCustomFrom + "T00:00:00")), endOfDay(new Date(state.movCustomTo + "T00:00:00"))];
-  }
-  return [null, null]; // "todos" — sem limite de data
-}
-
-function filteredMovements() {
-  const [from, to] = movPeriodRange();
-  return state.stockEntries.filter((m) => {
-    const t = new Date(m.entered_at);
-    if (from && t < from) return false;
-    if (to && t > to) return false;
-    if (state.movProduct && m.product_id !== state.movProduct) return false;
-    if (state.movUser && (m.logged_by || "").toLowerCase() !== state.movUser.toLowerCase()) return false;
-    if (state.movLocation && m.location !== state.movLocation) return false;
-    if (state.movType !== "todos" && m.movement_type !== state.movType) return false;
-    return true;
-  }).sort((a, b) => (a.entered_at < b.entered_at ? 1 : -1));
-}
-
-function movementUsers() {
-  const set = new Set(state.stockEntries.map((m) => m.logged_by).filter(Boolean));
-  return Array.from(set).sort((a, b) => a.localeCompare(b, "pt-BR"));
-}
-
-async function openStockEntryModal() {
-  if (!state.products.length) { alert("Cadastre um produto no estoque antes de registrar uma entrada."); return; }
-  const lastUser = localStorage.getItem("cafe_app_last_stock_user") || "";
-  const backdrop = document.createElement("div");
-  backdrop.className = "modal-backdrop";
-  backdrop.innerHTML = `
-    <div class="modal">
-      <div class="row" style="margin-bottom:16px;">
-        <h3 class="serif" style="margin:0;font-size:17px;">Registrar entrada de estoque</h3>
-        <button class="icon-btn" id="modal-close">✕</button>
-      </div>
-      <div style="display:flex;flex-direction:column;gap:12px;">
-        <div>
-          <label class="field-label">Produto</label>
-          <select id="se-product">${state.products.map((p) => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join("")}</select>
-        </div>
-        <div class="grid2">
-          <div><label class="field-label">Quantidade (pacotes)</label><input id="se-qty" type="number" min="0.001" step="any" placeholder="0" /></div>
-          <div><label class="field-label">Localidade</label>
-            <select id="se-location"><option value="mhu">Manhuaçu</option><option value="bh">BH</option></select>
-          </div>
-        </div>
-        <div class="grid2">
-          <div><label class="field-label">Custo unitário (opcional)</label><input id="se-cost" type="number" min="0" step="any" placeholder="0,00" /></div>
-          <div><label class="field-label">Motivo</label>
-            <select id="se-reason">
-              <option value="Compra de fornecedor">Compra de fornecedor</option>
-              <option value="Transferência entre localidades">Transferência</option>
-              <option value="Ajuste de estoque">Ajuste de estoque</option>
-              <option value="Outro">Outro</option>
-            </select>
-          </div>
-        </div>
-        <div><label class="field-label">Quem está registrando?</label><input id="se-user" value="${escapeHtml(lastUser)}" placeholder="seu nome" /></div>
-        <div><label class="field-label">Observação (opcional)</label><input id="se-note" placeholder="ex: nota fiscal 1234" /></div>
-        <div style="display:flex;gap:8px;margin-top:6px;">
-          <button class="btn" id="modal-cancel" style="flex:1;">Cancelar</button>
-          <button class="btn btn-accent" id="modal-save" style="flex:1;">Registrar</button>
-        </div>
-      </div>
-    </div>`;
-  document.body.appendChild(backdrop);
-  backdrop.onclick = (e) => { if (e.target === backdrop) backdrop.remove(); };
-  $("#modal-close", backdrop).onclick = () => backdrop.remove();
-  $("#modal-cancel", backdrop).onclick = () => backdrop.remove();
-  $("#modal-save", backdrop).onclick = async () => {
-    const product = state.products.find((p) => p.id === $("#se-product", backdrop).value);
-    const quantity = Number($("#se-qty", backdrop).value) || 0;
-    const location = $("#se-location", backdrop).value;
-    const unitCost = Number($("#se-cost", backdrop).value) || 0;
-    const reason = $("#se-reason", backdrop).value;
-    const loggedBy = $("#se-user", backdrop).value.trim();
-    const note = $("#se-note", backdrop).value.trim();
-    if (!product || quantity <= 0) return;
-    if (loggedBy) localStorage.setItem("cafe_app_last_stock_user", loggedBy);
-    await registerStockEntry({ product, quantity, location, unitCost, reason, note, loggedBy });
-    backdrop.remove();
-  };
-}
-
-function renderMovimentacoes() {
-  const list = filteredMovements();
-  const entradas = list.filter((m) => m.movement_type === "entrada");
-  const saidas = list.filter((m) => m.movement_type === "saida");
-  const totalPacotesEntrada = entradas.reduce((s, m) => s + Number(m.quantity), 0);
-  const totalPacotesSaida = saidas.reduce((s, m) => s + Number(m.quantity), 0);
-
-  // Relatório de entradas por usuário (item 12)
-  const byUser = {};
-  entradas.forEach((m) => {
-    const key = m.logged_by || "Sem usuário informado";
-    if (!byUser[key]) byUser[key] = { count: 0, qty: 0 };
-    byUser[key].count += 1;
-    byUser[key].qty += Number(m.quantity);
-  });
-  const userRows = Object.entries(byUser).sort((a, b) => b[1].qty - a[1].qty);
-
-  // Entrada × Saída × Estoque atual (item 14) — só faz sentido mostrar
-  // quando um produto específico está selecionado no filtro.
-  let stockFormula = "";
-  if (state.movProduct) {
-    const product = state.products.find((p) => p.id === state.movProduct);
-    if (product) {
-      const qtyAtual = state.movLocation === "bh" ? Number(product.qty_bh || 0) : state.movLocation === "mhu" ? Number(product.qty_mhu || 0) : Number(product.quantity || 0);
-      const estoqueInicio = qtyAtual - totalPacotesEntrada + totalPacotesSaida;
-      stockFormula = `
-        <div class="card" style="margin-bottom:16px;">
-          <p style="margin:0 0 10px;font-size:13px;font-weight:500;color:var(--muted);">Entrada × Saída × Estoque — ${escapeHtml(product.name)}</p>
-          <div class="rc-detail"><span>Estoque no início do período (calculado)</span><b class="mono">${Number(estoqueInicio.toFixed(3))} ${product.unit}</b></div>
-          <div class="rc-detail"><span>+ Entradas no período</span><b class="mono" style="color:var(--accent-dark);">${Number(totalPacotesEntrada.toFixed(3))} ${product.unit}</b></div>
-          <div class="rc-detail"><span>− Saídas no período</span><b class="mono" style="color:var(--danger-text);">${Number(totalPacotesSaida.toFixed(3))} ${product.unit}</b></div>
-          <div class="rc-detail" style="border-top:1px solid var(--border);padding-top:6px;margin-top:2px;"><span>= Estoque atual</span><b class="mono">${Number(qtyAtual.toFixed(3))} ${product.unit}</b></div>
-        </div>`;
-    }
-  }
-
-  $("#main").innerHTML = `
-    <button class="btn btn-dark" id="btn-new-entry" style="width:100%;margin-bottom:20px;">+ Registrar entrada</button>
-
-    <p style="font-size:11px;font-weight:600;color:var(--muted2);text-transform:uppercase;letter-spacing:.04em;margin:0 0 6px;">Período</p>
-    <div class="rc-filter-pills" style="margin-bottom:10px;">
-      ${MOV_PERIODS.map((o) => `<button class="rc-pill mov-period-pill ${state.movPeriod === o.id ? "active" : ""}" data-period="${o.id}">${o.label}</button>`).join("")}
-    </div>
-    ${state.movPeriod === "personalizado" ? `
-      <div class="grid2" style="margin-bottom:10px;">
-        <div><label class="field-label">De</label><input id="mov-from" type="date" value="${state.movCustomFrom}" /></div>
-        <div><label class="field-label">Até</label><input id="mov-to" type="date" value="${state.movCustomTo}" /></div>
-      </div>` : ""}
-
-    <div class="grid2" style="margin-bottom:10px;">
-      <div><label class="field-label">Produto</label>
-        <select id="mov-product">
-          <option value="">Todos os produtos</option>
-          ${state.products.map((p) => `<option value="${p.id}" ${state.movProduct === p.id ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}
-        </select>
-      </div>
-      <div><label class="field-label">Usuário</label>
-        <select id="mov-user">
-          <option value="">Todos</option>
-          ${movementUsers().map((u) => `<option value="${escapeHtml(u)}" ${state.movUser === u ? "selected" : ""}>${escapeHtml(u)}</option>`).join("")}
-        </select>
-      </div>
-    </div>
-    <div class="grid2" style="margin-bottom:18px;">
-      <div><label class="field-label">Localidade</label>
-        <select id="mov-location">
-          <option value="">Todas</option>
-          <option value="Manhuaçu" ${state.movLocation === "Manhuaçu" ? "selected" : ""}>Manhuaçu</option>
-          <option value="BH" ${state.movLocation === "BH" ? "selected" : ""}>BH</option>
-        </select>
-      </div>
-      <div><label class="field-label">Tipo</label>
-        <select id="mov-type">
-          <option value="todos" ${state.movType === "todos" ? "selected" : ""}>Entradas e saídas</option>
-          <option value="entrada" ${state.movType === "entrada" ? "selected" : ""}>Só entradas</option>
-          <option value="saida" ${state.movType === "saida" ? "selected" : ""}>Só saídas</option>
-        </select>
-      </div>
-    </div>
-
-    <div class="grid2" style="margin-bottom:16px;">
-      <div class="metric"><div class="label">📥 Entradas</div><div class="value mono">${entradas.length}</div><div style="font-size:11px;color:var(--muted2);margin-top:2px;">${Number(totalPacotesEntrada.toFixed(3))} pacotes</div></div>
-      <div class="metric"><div class="label">📤 Saídas</div><div class="value mono">${saidas.length}</div><div style="font-size:11px;color:var(--muted2);margin-top:2px;">${Number(totalPacotesSaida.toFixed(3))} pacotes</div></div>
-    </div>
-
-    ${stockFormula}
-
-    ${userRows.length ? `
-      <div class="card" style="margin-bottom:16px;">
-        <p style="margin:0 0 10px;font-size:13px;font-weight:500;color:var(--muted);">Relatório de entradas por usuário</p>
-        ${userRows.map(([user, info]) => `
-          <div class="rc-detail"><span>${escapeHtml(user)}</span><b>${info.count} entrada${info.count === 1 ? "" : "s"} · ${Number(info.qty.toFixed(3))} pacotes</b></div>
-        `).join("")}
-        <div class="rc-detail" style="border-top:1px solid var(--border);padding-top:6px;margin-top:2px;"><span>Total</span><b>${entradas.length} entrada${entradas.length === 1 ? "" : "s"} · ${Number(totalPacotesEntrada.toFixed(3))} pacotes</b></div>
-      </div>` : ""}
-
-    <p style="font-size:13px;font-weight:500;color:var(--muted);margin:0 0 8px;">Movimentações</p>
-    ${list.length === 0 ? `<div class="empty">Nenhuma movimentação nessa condição.</div>` : `
-      <div style="display:flex;flex-direction:column;gap:8px;">
-        ${list.map((m) => `
-          <div class="card" style="padding:10px 12px;">
-            <div class="row" style="align-items:flex-start;">
-              <div style="min-width:0;">
-                <p style="margin:0;font-size:14px;">${m.movement_type === "entrada" ? "📥" : "📤"} ${escapeHtml(m.product_name)}</p>
-                <p style="margin:2px 0 0;font-size:12px;color:var(--muted2);">
-                  ${new Date(m.entered_at).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}
-                  ${m.location ? " · " + escapeHtml(m.location) : ""}
-                  ${m.logged_by ? " · " + escapeHtml(m.logged_by) : ""}
-                </p>
-                ${m.reason || m.order_key || m.note ? `<p style="margin:4px 0 0;font-size:12px;color:var(--muted2);">
-                  ${m.reason ? escapeHtml(m.reason) : ""}${m.order_key ? ` · Pedido #${orderNumber(m.order_key)}` : ""}${m.note ? " · " + escapeHtml(m.note) : ""}
-                </p>` : ""}
-              </div>
-              <span class="mono" style="font-size:14px;flex-shrink:0;color:${m.movement_type === "entrada" ? "var(--accent-dark)" : "var(--danger-text)"};">${m.movement_type === "entrada" ? "+" : "−"}${Number(m.quantity)}</span>
-            </div>
-          </div>`).join("")}
-      </div>`}
-  `;
-
-  $("#btn-new-entry").onclick = () => openStockEntryModal();
-  $$(".mov-period-pill", $("#main")).forEach((btn) => { btn.onclick = () => { state.movPeriod = btn.dataset.period; renderMovimentacoes(); }; });
-  $("#mov-from") && ($("#mov-from").onchange = (e) => { state.movCustomFrom = e.target.value; renderMovimentacoes(); });
-  $("#mov-to") && ($("#mov-to").onchange = (e) => { state.movCustomTo = e.target.value; renderMovimentacoes(); });
-  $("#mov-product").onchange = (e) => { state.movProduct = e.target.value; renderMovimentacoes(); };
-  $("#mov-user").onchange = (e) => { state.movUser = e.target.value; renderMovimentacoes(); };
-  $("#mov-location").onchange = (e) => { state.movLocation = e.target.value; renderMovimentacoes(); };
-  $("#mov-type").onchange = (e) => { state.movType = e.target.value; renderMovimentacoes(); };
 }
 
 // ---- Resumo ----
