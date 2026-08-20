@@ -25,8 +25,9 @@
   .header-left{display:flex; flex-direction:column;}
   #btn-logout{background:none; border:none; color:#C9B896; cursor:pointer; font-size:18px; padding:4px; opacity:.7;}
   #btn-logout:hover{opacity:1;}
-  nav{display:flex; border-bottom:1px solid var(--border); background:var(--surface); position:sticky; top:0; z-index:5;}
-  nav button{flex:1; padding:10px 2px; background:none; border:none; border-bottom:2px solid transparent; font-size:11px; font-weight:500; color:var(--muted2); cursor:pointer; white-space:nowrap;}
+  nav{display:flex; border-bottom:1px solid var(--border); background:var(--surface); position:sticky; top:0; z-index:5; overflow-x:auto; -webkit-overflow-scrolling:touch; scrollbar-width:none;}
+  nav::-webkit-scrollbar{display:none;}
+  nav button{flex:0 0 auto; padding:10px 12px; background:none; border:none; border-bottom:2px solid transparent; font-size:12px; font-weight:500; color:var(--muted2); cursor:pointer; white-space:nowrap;}
   nav button.active{color:var(--ink); border-color:var(--accent);}
   main{padding:20px;}
   .btn{border-radius:10px; border:1px solid var(--border-strong); padding:9px 14px; font-size:13px; font-weight:500; cursor:pointer; background:var(--card); color:var(--ink);}
@@ -240,11 +241,12 @@
   </header>
   <nav id="tabs">
     <button data-tab="estoque" class="active">Estoque</button>
-    <button data-tab="vendas">Vendas</button>
+    <button data-tab="pedidos">Pedidos</button>
+    <button data-tab="caixa">Caixa</button>
+    <button data-tab="movimentacoes">Movimentações</button>
     <button data-tab="clientes">Clientes</button>
     <button data-tab="recompras">Recompras</button>
     <button data-tab="receber">A Receber</button>
-    <button data-tab="pedidos">Pedidos</button>
     <button data-tab="resumo">Resumo</button>
     <button data-tab="vendedores">Vendedores</button>
   </nav>

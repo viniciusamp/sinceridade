@@ -43,6 +43,15 @@ create table if not exists stock_entries (
   entered_at timestamptz not null default now()
 );
 
+-- Movimentações de estoque (entrada/saída) — essa tabela já existia mas
+-- nunca era usada; agora vira o "livro-caixa" do estoque. Toda venda passa
+-- a gerar automaticamente uma saída aqui (sem duplicar nada), e entradas
+-- manuais (compra de fornecedor etc.) também passam a ficar registradas.
+alter table stock_entries add column if not exists movement_type text not null default 'entrada'; -- entrada | saida
+alter table stock_entries add column if not exists location text; -- Manhuaçu | BH
+alter table stock_entries add column if not exists order_key uuid; -- pedido relacionado, quando a saída vem de uma venda
+alter table stock_entries add column if not exists reason text; -- motivo (Venda, Compra de fornecedor, Ajuste, etc.)
+
 -- Clientes
 create table if not exists clients (
   id uuid primary key default gen_random_uuid(),
@@ -90,6 +99,7 @@ create table if not exists receivable_payments (
   note text,
   paid_at timestamptz not null default now()
 );
+alter table receivable_payments add column if not exists payment_method text; -- pix | dinheiro | cartao
 
 -- Registro de contatos de recompra (histórico de quando a equipe avisou o
 -- cliente que a recompra estava chegando). NÃO guarda a previsão em si —
@@ -107,7 +117,38 @@ create table if not exists recompra_contacts (
   created_at timestamptz not null default now()
 );
 
--- Status de entrega dos pedidos (a venda em si já existe em "sales";
+-- ── Caixa (livro-caixa) ────────────────────────────────────────────────────
+-- Um caixa é só um "cofre" nomeado (Caixa BH, Caixa Manhuaçu, Banco, Pix...).
+-- O saldo NUNCA é guardado direto nele — é sempre calculado a partir da soma
+-- das movimentações, pra nunca ficar dessincronizado.
+create table if not exists cash_registers (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  created_at timestamptz not null default now()
+);
+
+-- Livro-caixa. Alimentado automaticamente por vendas recebidas na hora e por
+-- quitações de Contas a Receber, além de lançamentos manuais (entrada, saída
+-- ou transferência entre caixas). "origin_type"/"origin_id" apontam pra
+-- operação que gerou o lançamento, quando existir — não duplica nada que já
+-- existe em "sales" ou "receivables", só referencia.
+create table if not exists cash_movements (
+  id uuid primary key default gen_random_uuid(),
+  cash_register_id uuid references cash_registers(id) on delete set null,
+  movement_type text not null, -- entrada | saida
+  amount numeric not null,
+  description text not null, -- histórico da movimentação
+  origin_type text not null default 'manual', -- venda | recebimento | manual | transferencia
+  origin_id uuid, -- sale_group_id (venda) ou receivable id (recebimento), quando houver
+  transfer_group_id uuid, -- liga as duas pernas de uma transferência entre caixas
+  related_cash_register_id uuid references cash_registers(id) on delete set null, -- o "outro lado" de uma transferência
+  logged_by text,
+  note text,
+  occurred_at timestamptz not null default now(),
+  created_at timestamptz not null default now()
+);
+
+
 -- aqui só guardamos se o pedido já foi entregue/retirado ou não).
 -- order_key = sale_group_id da venda (ou o próprio id da venda, quando ela
 -- não faz parte de um carrinho agrupado) — assim não duplicamos nada que já
@@ -134,6 +175,8 @@ alter table receivables enable row level security;
 alter table receivable_payments enable row level security;
 alter table recompra_contacts enable row level security;
 alter table order_deliveries enable row level security;
+alter table cash_registers enable row level security;
+alter table cash_movements enable row level security;
 
 -- Como é um app privado de uso familiar (sem login), liberamos acesso
 -- completo para quem tiver a chave "anon" do projeto (que fica só no
@@ -174,6 +217,14 @@ drop policy if exists "allow all order_deliveries" on order_deliveries;
 create policy "allow all order_deliveries" on order_deliveries
   for all using (true) with check (true);
 
+drop policy if exists "allow all cash_registers" on cash_registers;
+create policy "allow all cash_registers" on cash_registers
+  for all using (true) with check (true);
+
+drop policy if exists "allow all cash_movements" on cash_movements;
+create policy "allow all cash_movements" on cash_movements
+  for all using (true) with check (true);
+
 -- Ativa atualização em tempo real (pra sincronizar entre os dois aparelhos)
 -- Usa bloco protegido porque, se a tabela já estiver na publicação
 -- (por ex. rodando este script mais de uma vez), o ALTER daria erro.
@@ -205,5 +256,11 @@ begin
   exception when others then null; end;
   begin
     alter publication supabase_realtime add table order_deliveries;
+  exception when others then null; end;
+  begin
+    alter publication supabase_realtime add table cash_registers;
+  exception when others then null; end;
+  begin
+    alter publication supabase_realtime add table cash_movements;
   exception when others then null; end;
 end $$;

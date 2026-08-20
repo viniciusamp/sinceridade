@@ -6,23 +6,90 @@ Leva uns 10 minutos, sem precisar programar.
 
 ## Novidades desta versão
 
-- **Pedidos (status de entrega e pagamento):** nova aba **Pedidos**, que
-  mostra cada venda já registrada (agrupada por carrinho, do jeito que ela
-  foi feita na aba Vendas) com dois status:
-  - **Entrega:** pendente ou entregue — marque **"Confirmar entrega"** quando
-    o cliente retirar/receber o pedido (guarda quem confirmou e uma
-    observação opcional). Isso é só um controle de acompanhamento — **o
-    estoque continua saindo no momento da venda**, como já funcionava antes;
-    marcar a entrega não mexe em estoque nem duplica nada.
-  - **Pagamento:** vendas à vista (Pix/Dinheiro/Cartão) aparecem
-    automaticamente como pagas. Vendas **à prazo** mostram o mesmo status
-    da aba **A Receber** (Em aberto / Parcial / Pago), e o botão **"Registrar
-    pagamento"** abre o mesmo fluxo de lá — não existe um controle de
-    pagamento duplicado, é a mesma informação vista de outro ângulo.
-  - Filtros rápidos: Todos, Entrega pendente, Entregues, Pagamento pendente.
-- **Previsão de recompra (nova aba "Recompras"):** o app agora estuda o
-  histórico de compras de cada cliente **por produto** e estima quando ele
-  deve comprar de novo, para você entrar em contato **antes** de acabar.
+- **Caixa (nova aba) — livro-caixa de verdade.** Você cadastra os caixas que
+  usa (ex.: Caixa BH, Caixa Manhuaçu, Banco, Pix) e o app mostra o saldo de
+  cada um e o **saldo consolidado**. O saldo nunca é digitado — é sempre a
+  soma das movimentações, então nunca fica dessincronizado.
+  - **Venda recebida na hora** (Pix/Dinheiro/Cartão): ao registrar o
+    pedido, você escolhe **qual caixa recebeu** o dinheiro (ou "Não lançar
+    no caixa", se preferir não usar essa parte agora). Venda **à prazo**
+    não mexe em caixa nenhum até ser paga de verdade.
+  - **Quitação de Contas a Receber:** o modal de "Registrar pagamento"
+    ganhou um campo de caixa — ao confirmar, a entrada é lançada sozinha.
+  - **Lançamento manual:** botão "+ Nova movimentação" para Entrada, Saída
+    ou **Transferência entre caixas** (gera duas pernas vinculadas — uma
+    saída no caixa de origem, uma entrada no de destino — e o saldo
+    consolidado não muda, porque é dinheiro só trocando de lugar).
+  - Filtros: caixa, tipo (entrada/saída/transferência), período
+    (Hoje/Ontem/Semana/Mês/Personalizado/Todos) e usuário.
+  - Cada card de caixa tem editar (✎) e excluir (🗑) — só não deixa excluir
+    um caixa que já tem movimentações, pra não perder histórico.
+  - **Sobre "Contas a Pagar":** o pedido original mencionava isso, mas essa
+    funcionalidade não existe no sistema hoje — só Contas a Receber. Não
+    inventei um módulo de Contas a Pagar; deixei a estrutura do Caixa
+    pronta pra plugar isso no futuro, se quiser.
+
+- **Contas a Receber: quitação completa direto na tela.** Ao clicar no
+  cliente, cada dívida agora mostra **de qual pedido** ela veio (nº do
+  pedido, igual ao que aparece na aba Pedidos). O botão "Registrar
+  pagamento" ganhou um campo de **forma de pagamento** (Pix/Dinheiro/Cartão)
+  — cada quitação parcial fica registrada com a forma usada, e o histórico
+  de pagamentos do cliente mostra isso também. Adicionei também uma busca
+  por nome no topo da aba, pra achar o cliente rápido numa lista grande.
+- **Movimentações: agora dá pra excluir um lançamento** — cada linha tem um
+  🗑 pra remover um registro incorreto/duplicado do histórico. Importante:
+  isso só apaga o registro do relatório, **não desfaz** a alteração no
+  estoque do produto (se a movimentação errada também mudou a quantidade
+  em estoque, corrija a quantidade separadamente no cadastro do produto).
+- **Movimentações de estoque (aba nova):** toda vez que uma venda sai do
+  estoque, o app agora registra automaticamente essa **saída** — sem nenhum
+  passo extra e sem duplicar nada. Também dá pra registrar **entradas**
+  manuais (compra de fornecedor etc.) pelo botão **"+ Registrar entrada"**.
+  - Cada movimentação guarda: data/hora, tipo (entrada/saída), produto,
+    quantidade, localidade, usuário responsável, motivo, pedido relacionado
+    (quando a saída vem de uma venda) e observação.
+  - Filtros: período (Hoje/Ontem/Semana/Mês/Personalizado/Todos), produto,
+    usuário, localidade e tipo.
+  - **Relatório de entradas por usuário** — mostra quantas entradas e
+    quantos pacotes cada pessoa registrou no período, com total geral.
+  - **Entrada × Saída × Estoque** — ao filtrar por um produto específico, o
+    app mostra o estoque calculado no início do período, quanto entrou,
+    quanto saiu e o estoque atual (esse último sempre em tempo real, vindo
+    direto do cadastro do produto — o "início do período" é calculado a
+    partir dele, não é uma foto salva do passado).
+  - Se você apagar um pedido (na aba Pedidos), a saída de estoque
+    correspondente também é removida do histórico — para o relatório nunca
+    mostrar um movimento "fantasma" de uma venda que não existe mais.
+  - Os botões rápidos de **+ / −** na aba Estoque (que já existiam) também
+    passaram a gerar uma movimentação simples ("Ajuste rápido"), pra nada
+    ficar de fora do histórico.
+- **Pedidos virou a tela central de vendas.** A antiga aba "Vendas" foi
+  removida — agora tudo acontece em **Pedidos**:
+  - Botão **"+ Novo Pedido"** abre o formulário de venda (cliente, vendedor,
+    localidade do estoque, itens, desconto, forma de pagamento) — é o mesmo
+    fluxo de antes, só que num formulário que abre por cima da lista de
+    pedidos, em vez de numa aba separada.
+  - Dentro do formulário, o botão **"+ Novo"** ao lado do campo Cliente abre
+    um cadastro rápido (só **nome e telefone**). Ao salvar, o cliente já
+    fica selecionado no pedido e os produtos que você já tinha adicionado
+    **não se perdem**. Dá pra completar o resto do cadastro (cidade,
+    aniversário) depois, na aba Clientes, quando sobrar um tempo.
+  - Cada pedido mostra **Pagamento: 🟢 Pago / 🔴 Pendente** e **Entrega: 🟢
+    Entregue / 🔴 Pendente**, dois controles independentes.
+  - Pagamento à vista (Pix/Dinheiro/Cartão) já nasce **pago**. Pagamento **à
+    prazo** usa exatamente a mesma estrutura de **Contas a Receber** de
+    sempre — nada foi duplicado. O botão **"Quitar pagamento"** dentro do
+    pedido abre o mesmo registro de pagamento da aba A Receber.
+  - Filtros combináveis: Pagamento (Todos/Pagos/Pendentes) + Entrega
+    (Todos/Entregues/Pendentes) — dá pra ver, por exemplo, só quem já
+    recebeu o café mas ainda não pagou.
+  - A aba **A Receber** continua existindo à parte, como uma visão
+    consolidada por cliente (quanto cada um deve no total) — útil pra uma
+    visão geral, mas o dia a dia de "quitar" um pedido específico agora é
+    feito direto em Pedidos, sem precisar trocar de tela.
+- **Previsão de recompra (aba "Recompras"):** o app estuda o histórico de
+  compras de cada cliente **por produto** e estima quando ele deve comprar
+  de novo, para você entrar em contato **antes** de acabar.
   - A previsão é feita **produto por produto**. Um mesmo cliente que compra
     Café 250 g e Café 500 g tem uma previsão para cada embalagem — elas nunca
     se misturam.
@@ -113,6 +180,16 @@ Leva uns 10 minutos, sem precisar programar.
 
 - Tabela nova **order_deliveries**: guarda só o status de entrega de cada
   pedido (usada pela aba Pedidos). Não duplica vendas nem mexe em estoque.
+- Na tabela **stock_entries** (já existia, mas agora é usada de verdade):
+  `movement_type` (entrada/saída), `location`, `order_key` (pedido
+  relacionado, quando a saída vem de uma venda) e `reason` (motivo). É o que
+  alimenta a nova aba Movimentações.
+- Na tabela **receivable_payments**: `payment_method` (forma de pagamento
+  usada em cada quitação — Pix/Dinheiro/Cartão).
+- Tabelas novas **cash_registers** e **cash_movements**: o livro-caixa
+  completo (aba Caixa). `cash_movements` guarda tipo, valor, descrição,
+  caixa, data/hora, usuário, e a origem do lançamento (venda, recebimento,
+  transferência ou manual) sem duplicar nada de `sales`/`receivables`.
 
 > Se você já usava uma versão antiga do app, rode o `supabase-schema.sql`
 > novamente — ele foi atualizado e cria as tabelas/colunas que faltavam. É
