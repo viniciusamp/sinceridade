@@ -387,17 +387,16 @@ function subscribeRealtime() {
 async function addProduct(data) {
   await db.from("products").insert({
     name: data.name, unit: data.unit,
-    quantity: (Number(data.qtyMhu) || 0) + (Number(data.qtyBh) || 0),
-    qty_mhu: data.qtyMhu, qty_bh: data.qtyBh,
     min_stock: data.minStock, price: data.price, cost: data.cost,
+    cost_packaging: data.costPackaging, cost_roasting: data.costRoasting, cost_stickers: data.costStickers,
   });
 }
 async function updateProduct(id, data) {
+  // Não altera quantidade/localidade — isso só muda pela aba Movimentações.
   await db.from("products").update({
     name: data.name, unit: data.unit,
-    quantity: (Number(data.qtyMhu) || 0) + (Number(data.qtyBh) || 0),
-    qty_mhu: data.qtyMhu, qty_bh: data.qtyBh,
     min_stock: data.minStock, price: data.price, cost: data.cost,
+    cost_packaging: data.costPackaging, cost_roasting: data.costRoasting, cost_stickers: data.costStickers,
   }).eq("id", id);
 }
 async function deleteProduct(id) { await db.from("products").delete().eq("id", id); }
@@ -461,6 +460,15 @@ async function registerCashTransfer({ fromRegisterId, toRegisterId, amount, note
   });
 }
 
+async function deleteCashMovement(movement) {
+  if (movement.origin_type === "transferencia" && movement.transfer_group_id) {
+    // Apaga as duas pernas juntas, senão o saldo consolidado ficaria errado.
+    await db.from("cash_movements").delete().eq("transfer_group_id", movement.transfer_group_id);
+  } else {
+    await db.from("cash_movements").delete().eq("id", movement.id);
+  }
+}
+
 function cashRegisterBalance(registerId) {
   return state.cashMovements
     .filter((m) => m.cash_register_id === registerId)
@@ -484,18 +492,17 @@ async function registerStockEntry({ product, quantity, location, unitCost, reaso
   });
 }
 
-async function adjustQty(product, delta, location) {
+async function registerStockExit({ product, quantity, location, reason, note, loggedBy }) {
   const col = location === "bh" ? "qty_bh" : "qty_mhu";
-  const current = Number(product[col] || 0);
-  const nextVal = Math.max(0, Number((current + delta).toFixed(3)));
-  const patch = { [col]: nextVal };
+  const nextVal = Math.max(0, Number((Number(product[col] || 0) - Number(quantity)).toFixed(3)));
   const otherCol = location === "bh" ? "qty_mhu" : "qty_bh";
-  patch.quantity = Number((nextVal + Number(product[otherCol] || 0)).toFixed(3));
-  await db.from("products").update(patch).eq("id", product.id);
+  await db.from("products").update({
+    [col]: nextVal, quantity: Number((nextVal + Number(product[otherCol] || 0)).toFixed(3)),
+  }).eq("id", product.id);
   await logStockMovement({
     productId: product.id, productName: product.name, unit: product.unit,
-    movementType: delta > 0 ? "entrada" : "saida", quantity: 1, location: locName(location),
-    reason: "Ajuste rápido (+/-)", loggedBy: localStorage.getItem("cafe_app_last_stock_user") || null,
+    movementType: "saida", quantity, location: locName(location),
+    reason: reason || "Ajuste de estoque", note, loggedBy,
   });
 }
 
@@ -648,6 +655,21 @@ function openBirthdayPanel() {
   backdrop.onclick = (e) => { if (e.target === backdrop) backdrop.remove(); };
   $("#bp-close", backdrop).onclick = () => backdrop.remove();
 }
+// ---- Tema claro/escuro ----
+function applyTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+  const btn = document.getElementById("btn-theme");
+  if (btn) btn.textContent = theme === "dark" ? "☀️" : "🌙";
+}
+(function initTheme() {
+  applyTheme(localStorage.getItem("cafe_app_theme") || "light");
+})();
+document.getElementById("btn-theme")?.addEventListener("click", () => {
+  const next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+  localStorage.setItem("cafe_app_theme", next);
+  applyTheme(next);
+});
+
 document.getElementById("btn-birthday")?.addEventListener("click", openBirthdayPanel);
 
 // ---- Vendedores ----
@@ -729,50 +751,6 @@ function openSellerModal(seller) {
     if (isEdit) await updateSeller(seller.id, data); else await addSeller(data);
     backdrop.remove();
   };
-}
-
-// ---- Wheel Picker (0–100) ----
-function buildWheelPicker(id, initialValue) {
-  const val = Math.max(0, Math.min(100, Math.round(Number(initialValue) || 0)));
-  return `
-    <div class="wheel-wrap" id="${id}-wrap" data-value="${val}">
-      <div class="wheel-fade-top"></div>
-      <div class="wheel-highlight"></div>
-      <div class="wheel-fade-bottom"></div>
-      <div class="wheel-scroll" id="${id}-scroll">
-        ${Array.from({ length: 101 }, (_, i) => `<div class="wheel-item" data-num="${i}">${i}</div>`).join("")}
-      </div>
-    </div>`;
-}
-function initWheelPicker(id, onChange) {
-  const scroll = document.getElementById(`${id}-scroll`);
-  const wrap = document.getElementById(`${id}-wrap`);
-  if (!scroll || !wrap) return;
-  const itemHeight = 28;
-  const value = Number(wrap.dataset.value) || 0;
-  scroll.scrollTop = value * itemHeight;
-
-  const markCenter = () => {
-    const items = $$(".wheel-item", scroll);
-    items.forEach((it) => it.classList.remove("center"));
-    const idx = Math.round(scroll.scrollTop / itemHeight);
-    if (items[idx]) items[idx].classList.add("center");
-    return idx;
-  };
-  markCenter();
-
-  let debounce;
-  scroll.addEventListener("scroll", () => {
-    clearTimeout(debounce);
-    debounce = setTimeout(() => {
-      const idx = Math.max(0, Math.min(100, Math.round(scroll.scrollTop / itemHeight)));
-      scroll.scrollTop = idx * itemHeight;
-      wrap.dataset.value = idx;
-      markCenter();
-      onChange && onChange(idx);
-    }, 90);
-  });
-  wrap.getValue = () => Number(wrap.dataset.value) || 0;
 }
 
 // ---- Rendering ----
@@ -877,19 +855,11 @@ function renderEstoque() {
           <div class="loc-grid">
             <div class="loc-block">
               <span class="loc-label">Manhuaçu</span>
-              <div style="display:flex;align-items:center;gap:6px;">
-                <button class="qty-btn btn-minus-mhu">−</button>
-                <span class="mono" style="flex:1;text-align:center;">${Number(p.qty_mhu || 0)} ${p.unit}</span>
-                <button class="qty-btn btn-plus-mhu">+</button>
-              </div>
+              <p class="mono" style="margin:2px 0 0;font-size:15px;">${Number(p.qty_mhu || 0)} ${p.unit}</p>
             </div>
             <div class="loc-block">
               <span class="loc-label">BH</span>
-              <div style="display:flex;align-items:center;gap:6px;">
-                <button class="qty-btn btn-minus-bh">−</button>
-                <span class="mono" style="flex:1;text-align:center;">${Number(p.qty_bh || 0)} ${p.unit}</span>
-                <button class="qty-btn btn-plus-bh">+</button>
-              </div>
+              <p class="mono" style="margin:2px 0 0;font-size:15px;">${Number(p.qty_bh || 0)} ${p.unit}</p>
             </div>
           </div>
           <div class="row" style="margin-top:10px;">
@@ -899,6 +869,7 @@ function renderEstoque() {
         </div>
       `).join("")}
     </div>
+    <p style="font-size:11px;color:var(--muted2);text-align:center;margin-top:16px;">Para ajustar quantidades, use a aba <b>Movimentações</b> — assim fica registrado quem fez e por quê.</p>
   `;
 
   $("#stock-loc-filter").onchange = (e) => { $("#stock-loc-list").innerHTML = buildStockList(e.target.value); };
@@ -907,13 +878,11 @@ function renderEstoque() {
     const id = card.dataset.id;
     const product = state.products.find((p) => p.id === id);
     if (!product) return;
-    $(".btn-edit", card).onclick = () => openProductModal(product);
-    $(".btn-delete", card).onclick = async () => { if (confirm(`Remover "${product.name}"?`)) await deleteProduct(id); };
-    $(".btn-minus-mhu", card).onclick = () => adjustQty(product, -1, "mhu");
-    $(".btn-plus-mhu", card).onclick = () => adjustQty(product, 1, "mhu");
-    $(".btn-minus-bh", card).onclick = () => adjustQty(product, -1, "bh");
-    $(".btn-plus-bh", card).onclick = () => adjustQty(product, 1, "bh");
-    $(".btn-vender", card).onclick = () => openNewOrderModal({ presetProductId: id });
+    card.style.cursor = "pointer";
+    card.onclick = () => openProductModal(product);
+    $(".btn-edit", card).onclick = (e) => { e.stopPropagation(); openProductModal(product); };
+    $(".btn-delete", card).onclick = async (e) => { e.stopPropagation(); if (confirm(`Remover "${product.name}"?`)) await deleteProduct(id); };
+    $(".btn-vender", card).onclick = (e) => { e.stopPropagation(); openNewOrderModal({ presetProductId: id }); };
   });
 }
 
@@ -934,16 +903,6 @@ function openProductModal(product) {
         </div>
         <div class="grid2">
           <div>
-            <label class="field-label">Qtd. em Manhuaçu</label>
-            ${buildWheelPicker("f-qty-mhu", isEdit ? product.qty_mhu : 0)}
-          </div>
-          <div>
-            <label class="field-label">Qtd. em BH</label>
-            ${buildWheelPicker("f-qty-bh", isEdit ? product.qty_bh : 0)}
-          </div>
-        </div>
-        <div class="grid2">
-          <div>
             <label class="field-label">Unidade</label>
             <select id="f-unit">${UNITS.map((u) => `<option value="${u}" ${isEdit && product.unit === u ? "selected" : ""}>${u}</option>`).join("")}</select>
           </div>
@@ -952,17 +911,19 @@ function openProductModal(product) {
             <input id="f-min" type="number" step="any" value="${isEdit ? product.min_stock : ""}" placeholder="0" />
           </div>
         </div>
+        <p style="margin:0;font-size:13px;font-weight:500;color:var(--muted);">Custo de produção (por ${isEdit ? escapeHtml(product.unit) : "unidade"})</p>
         <div class="grid2">
-          <div>
-            <label class="field-label">Custo (R$)</label>
-            <input id="f-cost" type="number" step="any" value="${isEdit ? Number(product.cost || 0) : ""}" placeholder="0,00" />
-          </div>
-          <div>
-            <label class="field-label">Preço de venda (R$)</label>
-            <input id="f-price" type="number" step="any" value="${isEdit ? product.price : ""}" placeholder="0,00" />
-          </div>
+          <div><label class="field-label">Embalagem (R$)</label><input id="f-cost-packaging" type="number" step="any" value="${isEdit ? Number(product.cost_packaging || 0) : ""}" placeholder="0,00" /></div>
+          <div><label class="field-label">Torra (R$)</label><input id="f-cost-roasting" type="number" step="any" value="${isEdit ? Number(product.cost_roasting || 0) : ""}" placeholder="0,00" /></div>
+        </div>
+        <div><label class="field-label">Adesivos (R$)</label><input id="f-cost-stickers" type="number" step="any" value="${isEdit ? Number(product.cost_stickers || 0) : ""}" placeholder="0,00" /></div>
+        <p id="f-cost-total" style="margin:0;font-size:13px;color:var(--muted);">Custo total: <b class="mono">R$ 0,00</b></p>
+        <div>
+          <label class="field-label">Preço de venda (R$)</label>
+          <input id="f-price" type="number" step="any" value="${isEdit ? product.price : ""}" placeholder="0,00" />
         </div>
         <div id="profit-preview" class="profit-preview" style="display:none;"></div>
+        ${!isEdit ? `<p style="margin:0;font-size:12px;color:var(--muted2);">Produto novo começa com estoque zerado. Depois de salvar, dê entrada na quantidade inicial pela aba <b>Movimentações</b>.</p>` : ""}
         <div style="display:flex;gap:8px;margin-top:6px;">
           <button class="btn" id="modal-cancel" style="flex:1;">Cancelar</button>
           <button class="btn btn-accent" id="modal-save" style="flex:1;">Salvar</button>
@@ -975,12 +936,15 @@ function openProductModal(product) {
   $("#modal-close", backdrop).onclick = () => backdrop.remove();
   $("#modal-cancel", backdrop).onclick = () => backdrop.remove();
 
-  initWheelPicker("f-qty-mhu");
-  initWheelPicker("f-qty-bh");
+  const totalCost = () =>
+    (Number($("#f-cost-packaging", backdrop).value) || 0) +
+    (Number($("#f-cost-roasting", backdrop).value) || 0) +
+    (Number($("#f-cost-stickers", backdrop).value) || 0);
 
   const updateProfit = () => {
-    const cost = Number($("#f-cost", backdrop).value) || 0;
+    const cost = totalCost();
     const price = Number($("#f-price", backdrop).value) || 0;
+    $("#f-cost-total", backdrop).innerHTML = `Custo total: <b class="mono">${money(cost)}</b>`;
     const preview = $("#profit-preview", backdrop);
     if (cost > 0 && price > 0) {
       const profit = price - cost;
@@ -995,21 +959,21 @@ function openProductModal(product) {
       preview.style.display = "flex";
     } else { preview.style.display = "none"; }
   };
-  $("#f-cost", backdrop).oninput = updateProfit;
-  $("#f-price", backdrop).oninput = updateProfit;
+  $$("#f-cost-packaging, #f-cost-roasting, #f-cost-stickers, #f-price", backdrop).forEach((el) => { el.oninput = updateProfit; });
   $("#f-unit", backdrop).onchange = updateProfit;
   updateProfit();
 
   $("#modal-save", backdrop).onclick = async () => {
     const data = {
       name: $("#f-name", backdrop).value.trim(),
-      qtyMhu: Number($("#f-qty-mhu-wrap", backdrop).dataset.value) || 0,
-      qtyBh: Number($("#f-qty-bh-wrap", backdrop).dataset.value) || 0,
       unit: $("#f-unit", backdrop).value,
       minStock: Number($("#f-min", backdrop).value) || 0,
       price: Number($("#f-price", backdrop).value) || 0,
-      cost: Number($("#f-cost", backdrop).value) || 0,
+      costPackaging: Number($("#f-cost-packaging", backdrop).value) || 0,
+      costRoasting: Number($("#f-cost-roasting", backdrop).value) || 0,
+      costStickers: Number($("#f-cost-stickers", backdrop).value) || 0,
     };
+    data.cost = data.costPackaging + data.costRoasting + data.costStickers;
     if (!data.name) return;
     if (isEdit) await updateProduct(product.id, data); else await addProduct(data);
     backdrop.remove();
@@ -2058,15 +2022,28 @@ function movementUsers() {
 }
 
 async function openStockEntryModal() {
-  if (!state.products.length) { alert("Cadastre um produto no estoque antes de registrar uma entrada."); return; }
+  if (!state.products.length) { alert("Cadastre um produto no estoque antes de registrar uma movimentação."); return; }
   const lastUser = localStorage.getItem("cafe_app_last_stock_user") || "";
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
-  backdrop.innerHTML = `
-    <div class="modal">
+  backdrop.innerHTML = `<div class="modal" id="se-modal-body"></div>`;
+  document.body.appendChild(backdrop);
+  backdrop.onclick = (e) => { if (e.target === backdrop) backdrop.remove(); };
+
+  let type = "entrada"; // entrada | saida
+  const entryReasons = ["Compra de fornecedor", "Transferência entre localidades", "Ajuste de estoque", "Outro"];
+  const exitReasons = ["Perda/quebra", "Uso interno", "Transferência entre localidades", "Ajuste de estoque", "Outro"];
+
+  function paint() {
+    const reasons = type === "entrada" ? entryReasons : exitReasons;
+    $("#se-modal-body", backdrop).innerHTML = `
       <div class="row" style="margin-bottom:16px;">
-        <h3 class="serif" style="margin:0;font-size:17px;">Registrar entrada de estoque</h3>
+        <h3 class="serif" style="margin:0;font-size:17px;">Nova movimentação de estoque</h3>
         <button class="icon-btn" id="modal-close">✕</button>
+      </div>
+      <div class="rc-filter-pills" style="margin-bottom:14px;">
+        <button class="rc-pill se-type-pill ${type === "entrada" ? "active" : ""}" data-type="entrada">📥 Entrada</button>
+        <button class="rc-pill se-type-pill ${type === "saida" ? "active" : ""}" data-type="saida">📤 Saída</button>
       </div>
       <div style="display:flex;flex-direction:column;gap:12px;">
         <div>
@@ -2080,14 +2057,9 @@ async function openStockEntryModal() {
           </div>
         </div>
         <div class="grid2">
-          <div><label class="field-label">Custo unitário (opcional)</label><input id="se-cost" type="number" min="0" step="any" placeholder="0,00" /></div>
+          ${type === "entrada" ? `<div><label class="field-label">Custo unitário (opcional)</label><input id="se-cost" type="number" min="0" step="any" placeholder="0,00" /></div>` : `<div></div>`}
           <div><label class="field-label">Motivo</label>
-            <select id="se-reason">
-              <option value="Compra de fornecedor">Compra de fornecedor</option>
-              <option value="Transferência entre localidades">Transferência</option>
-              <option value="Ajuste de estoque">Ajuste de estoque</option>
-              <option value="Outro">Outro</option>
-            </select>
+            <select id="se-reason">${reasons.map((r) => `<option value="${r}">${r}</option>`).join("")}</select>
           </div>
         </div>
         <div><label class="field-label">Quem está registrando?</label><input id="se-user" value="${escapeHtml(lastUser)}" placeholder="seu nome" /></div>
@@ -2096,25 +2068,34 @@ async function openStockEntryModal() {
           <button class="btn" id="modal-cancel" style="flex:1;">Cancelar</button>
           <button class="btn btn-accent" id="modal-save" style="flex:1;">Registrar</button>
         </div>
-      </div>
-    </div>`;
-  document.body.appendChild(backdrop);
-  backdrop.onclick = (e) => { if (e.target === backdrop) backdrop.remove(); };
-  $("#modal-close", backdrop).onclick = () => backdrop.remove();
-  $("#modal-cancel", backdrop).onclick = () => backdrop.remove();
-  $("#modal-save", backdrop).onclick = async () => {
-    const product = state.products.find((p) => p.id === $("#se-product", backdrop).value);
-    const quantity = Number($("#se-qty", backdrop).value) || 0;
-    const location = $("#se-location", backdrop).value;
-    const unitCost = Number($("#se-cost", backdrop).value) || 0;
-    const reason = $("#se-reason", backdrop).value;
-    const loggedBy = $("#se-user", backdrop).value.trim();
-    const note = $("#se-note", backdrop).value.trim();
-    if (!product || quantity <= 0) return;
-    if (loggedBy) localStorage.setItem("cafe_app_last_stock_user", loggedBy);
-    await registerStockEntry({ product, quantity, location, unitCost, reason, note, loggedBy });
-    backdrop.remove();
-  };
+      </div>`;
+    wire();
+  }
+
+  function wire() {
+    $("#modal-close", backdrop).onclick = () => backdrop.remove();
+    $("#modal-cancel", backdrop).onclick = () => backdrop.remove();
+    $$(".se-type-pill", backdrop).forEach((btn) => { btn.onclick = () => { type = btn.dataset.type; paint(); }; });
+    $("#modal-save", backdrop).onclick = async () => {
+      const product = state.products.find((p) => p.id === $("#se-product", backdrop).value);
+      const quantity = Number($("#se-qty", backdrop).value) || 0;
+      const location = $("#se-location", backdrop).value;
+      const unitCost = type === "entrada" ? (Number($("#se-cost", backdrop)?.value) || 0) : 0;
+      const reason = $("#se-reason", backdrop).value;
+      const loggedBy = $("#se-user", backdrop).value.trim();
+      const note = $("#se-note", backdrop).value.trim();
+      if (!product || quantity <= 0) return;
+      if (loggedBy) localStorage.setItem("cafe_app_last_stock_user", loggedBy);
+      if (type === "entrada") {
+        await registerStockEntry({ product, quantity, location, unitCost, reason, note, loggedBy });
+      } else {
+        await registerStockExit({ product, quantity, location, reason, note, loggedBy });
+      }
+      backdrop.remove();
+    };
+  }
+
+  paint();
 }
 
 function renderMovimentacoes() {
@@ -2154,7 +2135,7 @@ function renderMovimentacoes() {
   }
 
   $("#main").innerHTML = `
-    <button class="btn btn-dark" id="btn-new-entry" style="width:100%;margin-bottom:20px;">+ Registrar entrada</button>
+    <button class="btn btn-dark" id="btn-new-entry" style="width:100%;margin-bottom:20px;">+ Registrar entrada/saída</button>
 
     <p style="font-size:11px;font-weight:600;color:var(--muted2);text-transform:uppercase;letter-spacing:.04em;margin:0 0 6px;">Período</p>
     <div class="rc-filter-pills" style="margin-bottom:10px;">
@@ -2486,7 +2467,7 @@ function renderCaixa() {
     ${list.length === 0 ? `<div class="empty">Nenhuma movimentação nessa condição.</div>` : `
       <div style="display:flex;flex-direction:column;gap:8px;">
         ${list.map((m) => `
-          <div class="card" style="padding:10px 12px;">
+          <div class="card" data-cmid="${m.id}" style="padding:10px 12px;">
             <div class="row" style="align-items:flex-start;">
               <div style="min-width:0;">
                 <p style="margin:0;font-size:14px;">${escapeHtml(m.description)}</p>
@@ -2497,7 +2478,10 @@ function renderCaixa() {
                 </p>
                 <p style="margin:4px 0 0;font-size:12px;color:var(--muted2);">${cashMovementOriginLabel(m)}${m.note ? " · " + escapeHtml(m.note) : ""}</p>
               </div>
-              <span class="mono" style="font-size:14px;flex-shrink:0;color:${m.movement_type === "entrada" ? "var(--accent-dark)" : "var(--danger-text)"};">${m.movement_type === "entrada" ? "+" : "−"}${money(m.amount)}</span>
+              <div style="display:flex;align-items:center;gap:4px;flex-shrink:0;">
+                <span class="mono" style="font-size:14px;color:${m.movement_type === "entrada" ? "var(--accent-dark)" : "var(--danger-text)"};">${m.movement_type === "entrada" ? "+" : "−"}${money(m.amount)}</span>
+                <button class="icon-btn danger btn-del-cm" style="min-width:28px;min-height:28px;font-size:14px;padding:2px;" title="Excluir">🗑</button>
+              </div>
             </div>
           </div>`).join("")}
       </div>`}
@@ -2518,12 +2502,120 @@ function renderCaixa() {
     $(".cr-edit", card).onclick = () => openCashRegisterModal(register);
     $(".cr-delete", card).onclick = () => deleteCashRegister(register.id);
   });
+  $$(".btn-del-cm", $("#main")).forEach((btn) => {
+    btn.onclick = async () => {
+      const card = btn.closest(".card[data-cmid]");
+      const movement = state.cashMovements.find((m) => m.id === card.dataset.cmid);
+      if (!movement) return;
+      const msg = movement.origin_type === "transferencia"
+        ? "Essa é uma transferência entre caixas — excluir remove as DUAS pernas dela (origem e destino). Confirmar?"
+        : "Excluir esta movimentação do caixa? Essa ação não pode ser desfeita.";
+      if (confirm(msg)) await deleteCashMovement(movement);
+    };
+  });
   $$(".caixa-period-pill", $("#main")).forEach((btn) => { btn.onclick = () => { state.caixaPeriod = btn.dataset.period; renderCaixa(); }; });
   $("#caixa-from") && ($("#caixa-from").onchange = (e) => { state.caixaCustomFrom = e.target.value; renderCaixa(); });
   $("#caixa-to") && ($("#caixa-to").onchange = (e) => { state.caixaCustomTo = e.target.value; renderCaixa(); });
   $("#caixa-register-filter").onchange = (e) => { state.caixaRegister = e.target.value; renderCaixa(); };
   $("#caixa-type-filter").onchange = (e) => { state.caixaType = e.target.value; renderCaixa(); };
   $("#caixa-user-filter").onchange = (e) => { state.caixaUser = e.target.value; renderCaixa(); };
+}
+
+// ---- Exportação para Excel ----
+function exportSheetsToExcel(sheets, filename) {
+  if (typeof XLSX === "undefined") {
+    alert("A biblioteca de exportação não carregou (verifique sua conexão com a internet e tente de novo).");
+    return;
+  }
+  const wb = XLSX.utils.book_new();
+  sheets.forEach(({ name, rows }) => {
+    const ws = XLSX.utils.json_to_sheet(rows.length ? rows : [{ " ": "Sem dados nesse período" }]);
+    XLSX.utils.book_append_sheet(wb, ws, name.slice(0, 31)); // Excel limita o nome da aba a 31 caracteres
+  });
+  XLSX.writeFile(wb, filename);
+}
+
+function exportMonthSalesExcel(monthSales, monthLabelText) {
+  const rows = monthSales
+    .slice()
+    .sort((a, b) => (a.sold_at < b.sold_at ? -1 : 1))
+    .map((s) => ({
+      "Data/hora": new Date(s.sold_at).toLocaleString("pt-BR"),
+      Produto: s.product_name,
+      Cliente: s.client_name || "Cliente à vista",
+      Vendedor: s.seller_name || "",
+      "Forma de pagamento": paymentLabel(s.payment_method),
+      Localidade: s.location || "",
+      Quantidade: Number(s.quantity),
+      "Preço unitário (R$)": Number(s.unit_price),
+      "Desconto (R$)": Number(s.discount || 0),
+      "Custo no momento da venda (R$)": Number(s.cost_at_sale || 0),
+      "Total (R$)": Number(s.total),
+    }));
+  exportSheetsToExcel([{ name: "Vendas", rows }], `vendas-${monthLabelText.replace(/\s+/g, "-")}.xlsx`);
+}
+
+function exportFullReportExcel() {
+  // Resumo mensal — faturamento, custo e lucro mês a mês (bom pra enxergar tendência e comparar com metas).
+  const monthKeys = Array.from(new Set(state.sales.map((s) => s.sold_at.slice(0, 7)))).sort();
+  const monthlyRows = monthKeys.map((mk) => {
+    const sales = state.sales.filter((s) => s.sold_at.slice(0, 7) === mk);
+    const revenue = sales.reduce((s, x) => s + Number(x.total), 0);
+    const cost = sales.reduce((s, x) => s + Number(x.cost_at_sale || 0) * Number(x.quantity), 0);
+    const [y, m] = mk.split("-");
+    return {
+      Mês: `${MONTH_NAMES[Number(m) - 1]} de ${y}`,
+      "Nº de vendas": sales.length,
+      "Faturamento (R$)": Number(revenue.toFixed(2)),
+      "Custo estimado (R$)": Number(cost.toFixed(2)),
+      "Lucro estimado (R$)": Number((revenue - cost).toFixed(2)),
+    };
+  });
+
+  // Estoque atual — quantidade, valor parado em estoque e markup de cada produto.
+  const stockRows = state.products.map((p) => {
+    const cost = Number(p.cost || 0);
+    const price = Number(p.price || 0);
+    return {
+      Produto: p.name, Unidade: p.unit,
+      "Qtd. Manhuaçu": Number(p.qty_mhu || 0), "Qtd. BH": Number(p.qty_bh || 0),
+      "Qtd. total": Number(totalQty(p).toFixed(3)),
+      "Custo total (R$)": Number(cost.toFixed(2)),
+      "Preço de venda (R$)": Number(price.toFixed(2)),
+      "Markup (%)": cost > 0 ? Number(((price / cost - 1) * 100).toFixed(1)) : "",
+      "Valor em estoque (R$)": Number((price * totalQty(p)).toFixed(2)),
+    };
+  });
+
+  // Contas a receber — quem deve, quanto já pagou e o saldo, pra cobrança e projeção de caixa.
+  const receivableRows = receivablesByClient()
+    .sort((a, b) => b.saldo - a.saldo)
+    .map((g) => ({
+      Cliente: g.clientName,
+      "Total devido (R$)": Number(g.devido.toFixed(2)),
+      "Já pago (R$)": Number(g.pago.toFixed(2)),
+      "Saldo em aberto (R$)": Number(g.saldo.toFixed(2)),
+      Status: g.saldo > 0.004 ? "Em aberto" : "Quitado",
+    }));
+
+  // Vendas do mês selecionado no momento (mesmo recorte que o botão de exportar só o mês).
+  const monthSales = state.sales.filter((s) => s.sold_at.slice(0, 7) === state.resumoMonth);
+  const monthSalesRows = monthSales
+    .slice()
+    .sort((a, b) => (a.sold_at < b.sold_at ? -1 : 1))
+    .map((s) => ({
+      "Data/hora": new Date(s.sold_at).toLocaleString("pt-BR"),
+      Produto: s.product_name, Cliente: s.client_name || "Cliente à vista",
+      Vendedor: s.seller_name || "", "Forma de pagamento": paymentLabel(s.payment_method),
+      Quantidade: Number(s.quantity), "Total (R$)": Number(s.total),
+    }));
+
+  exportSheetsToExcel([
+    { name: "Resumo mensal", rows: monthlyRows },
+    { name: "Vendas do mês", rows: monthSalesRows },
+    { name: "Estoque atual", rows: stockRows },
+    { name: "Contas a receber", rows: receivableRows },
+  ], `relatorio-cafe-sinceridade-${todayISO()}.xlsx`);
 }
 
 // ---- Resumo ----
@@ -2644,15 +2736,26 @@ function renderResumo() {
       `).join("")}
     </div>
 
-    <div class="card">
+    <div class="card" style="margin-bottom:20px;">
       <p style="margin:0 0 10px;font-size:13px;font-weight:500;color:var(--muted);">Ranking de vendedores — ${monthLabel()}</p>
       ${sellerRanking.length === 0 ? `<p style="font-size:13px;color:var(--muted2);">Sem vendas neste mês.</p>` : sellerRanking.map(([name, total], i) => `
         <div class="row" style="font-size:14px;padding:4px 0;"><span>${i + 1}. ${escapeHtml(name)}</span><span class="mono" style="color:var(--muted);">${money(total)}</span></div>
       `).join("")}
     </div>
+
+    <div class="card" style="margin-top:20px;">
+      <p style="margin:0 0 4px;font-size:13px;font-weight:500;color:var(--muted);">📊 Exportar para Excel</p>
+      <p style="margin:0 0 12px;font-size:12px;color:var(--muted2);">Planilhas prontas pra apurar números e definir metas.</p>
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        <button class="btn" id="btn-export-month" style="width:100%;">Exportar vendas de ${monthLabel()} (.xlsx)</button>
+        <button class="btn btn-accent" id="btn-export-full" style="width:100%;">Exportar relatório completo (.xlsx)</button>
+      </div>
+    </div>
   `;
 
   $("#resumo-month-select").onchange = (e) => { state.resumoMonth = e.target.value; renderResumo(); };
+  $("#btn-export-month").onclick = () => exportMonthSalesExcel(monthSales, monthLabel());
+  $("#btn-export-full").onclick = () => exportFullReportExcel();
 }
 
 function escapeHtml(str) {

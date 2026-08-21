@@ -3,24 +3,33 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Estoque & Vendas — Café</title>
+<title>Café Sinceridade Gestão</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@500;600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
   :root{
     --bg:#F4EEDF; --surface:#FBF7EF; --card:#FFFFFF; --border:#E7DEC6; --border-strong:#DCD0B8;
     --ink:#2B1D14; --muted:#7A6A54; --muted2:#9A8A6D; --accent:#4C6B4F; --accent-dark:#3E5941;
     --warn-bg:#FBF3E0; --warn-border:#EAD7A8; --warn-text:#8A5A16;
     --danger:#B5432E; --danger-bg:#F7E2DD; --danger-text:#8C3A26;
+    --brand:#2B1D14; --brand-dark:#42301F; --input-bg:#FFFFFF;
+  }
+  html[data-theme="dark"]{
+    --bg:#1B140F; --surface:#241B14; --card:#2A2019; --border:#3D2E22; --border-strong:#4A3826;
+    --ink:#F1E7D8; --muted:#B9A78F; --muted2:#8C7B66; --accent:#7BAE7E; --accent-dark:#5C8760;
+    --warn-bg:#3A2E1A; --warn-border:#5C4826; --warn-text:#E3BE72;
+    --danger:#E28769; --danger-bg:#3A2019; --danger-text:#E8A088;
+    --brand:#120D09; --brand-dark:#0A0705; --input-bg:#2A2019;
   }
   *{box-sizing:border-box;}
   body{margin:0; background:var(--bg); font-family:'Inter',sans-serif; color:var(--ink);}
   .mono{font-family:'JetBrains Mono',monospace;}
   .serif{font-family:'Fraunces',serif;}
   #app{max-width:520px; margin:0 auto; min-height:100vh; background:var(--bg);}
-  header{background:var(--ink); color:#fff; padding:20px 20px 16px; display:flex; align-items:center; justify-content:space-between;}
-  header h1{font-size:18px; margin:0; display:flex; align-items:center; gap:8px;}
+  header{background:var(--brand); color:#fff; padding:20px 20px 16px; display:flex; align-items:center; justify-content:space-between;}
+  header h1{font-size:16px; margin:0; display:flex; align-items:center; gap:6px; line-height:1.2;}
   header p{font-size:12px; color:#C9B896; margin:4px 0 0;}
   .header-left{display:flex; flex-direction:column;}
   #btn-logout{background:none; border:none; color:#C9B896; cursor:pointer; font-size:18px; padding:4px; opacity:.7;}
@@ -32,12 +41,12 @@
   main{padding:20px;}
   .btn{border-radius:10px; border:1px solid var(--border-strong); padding:9px 14px; font-size:13px; font-weight:500; cursor:pointer; background:var(--card); color:var(--ink);}
   .btn:hover{background:var(--surface);}
-  .btn-dark{background:var(--ink); color:#fff; border:none;}
-  .btn-dark:hover{background:#42301F;}
+  .btn-dark{background:var(--brand); color:#fff; border:none;}
+  .btn-dark:hover{background:var(--brand-dark);}
   .btn-accent{background:var(--accent); color:#fff; border:none;}
   .btn-accent:hover{background:var(--accent-dark);}
   .btn-accent:disabled{opacity:.4; cursor:default;}
-  input, select{width:100%; border:1px solid var(--border-strong); border-radius:8px; padding:8px 10px; font-size:15px; background:#fff; color:var(--ink); font-family:inherit;}
+  input, select{width:100%; border:1px solid var(--border-strong); border-radius:8px; padding:8px 10px; font-size:15px; background:var(--input-bg); color:var(--ink); font-family:inherit;}
   input:focus, select:focus{outline:2px solid rgba(76,107,79,.35); border-color:var(--accent);}
   label.field-label{font-size:13px; color:var(--muted); display:block; margin-bottom:4px;}
   .card{background:var(--card); border:1px solid var(--border); border-radius:12px; padding:14px;}
@@ -57,7 +66,7 @@
   .modal-backdrop{position:fixed; inset:0; background:rgba(30,20,12,.45); display:flex; align-items:center; justify-content:center; z-index:50; padding:16px;}
   .modal{background:var(--surface); border:1px solid var(--border-strong); border-radius:16px; padding:20px; width:100%; max-width:420px; max-height:90vh; overflow-y:auto;}
   .empty{text-align:center; padding:40px 16px; border:1px dashed var(--border-strong); border-radius:12px; color:var(--muted);}
-  .qty-btn{width:28px; height:28px; border-radius:8px; border:1px solid var(--border-strong); background:#fff; display:flex; align-items:center; justify-content:center; cursor:pointer; color:var(--ink); font-size:16px;}
+  .qty-btn{width:28px; height:28px; border-radius:8px; border:1px solid var(--border-strong); background:var(--input-bg); display:flex; align-items:center; justify-content:center; cursor:pointer; color:var(--ink); font-size:16px;}
   .metric{background:var(--card); border-radius:12px; padding:14px; border:1px solid var(--border);}
   .metric .label{font-size:12px; color:var(--muted2); display:flex; align-items:center; gap:6px; margin-bottom:6px;}
   .metric .value{font-size:20px; font-weight:500;}
@@ -99,8 +108,8 @@
   #login-sub{margin:0; font-size:13px; color:var(--muted); text-align:center;}
   #login-fields{display:flex; flex-direction:column; gap:12px;}
   #login-error{display:none; color:var(--danger); font-size:13px; text-align:center; background:var(--danger-bg); border-radius:8px; padding:8px 12px;}
-  #login-btn{width:100%; padding:12px; border-radius:10px; background:var(--ink); color:#fff; border:none; font-size:15px; font-weight:500; cursor:pointer; font-family:inherit;}
-  #login-btn:hover{background:#42301F;}
+  #login-btn{width:100%; padding:12px; border-radius:10px; background:var(--brand); color:#fff; border:none; font-size:15px; font-weight:500; cursor:pointer; font-family:inherit;}
+  #login-btn:hover{background:var(--brand-dark);}
   #login-footer{font-size:11px; color:var(--muted2); text-align:center;}
 
   /* ── Wheel Picker ─────────────────────────────────────── */
@@ -165,7 +174,7 @@
   .rank-bar-bg{height:4px; background:var(--border); border-radius:2px; overflow:hidden; margin-top:5px;}
   .rank-bar-fg{height:100%; background:var(--accent); border-radius:2px; transition:width .3s;}
   /* Birthday indicator dot */
-  #birthday-dot{display:none; position:absolute; top:2px; right:2px; width:8px; height:8px; border-radius:50%; background:#E65100; border:1.5px solid var(--ink);}
+  #birthday-dot{display:none; position:absolute; top:2px; right:2px; width:8px; height:8px; border-radius:50%; background:#E65100; border:1.5px solid var(--brand);}
   #birthday-dot.show{display:block;}
 
   /* ── Recompra (previsão de recompra) ──── */
@@ -207,7 +216,7 @@
 <div id="login-screen">
   <div id="login-card">
     <div id="login-icon">☕</div>
-    <h1 id="login-title">Estoque &amp; Vendas</h1>
+    <h1 id="login-title">Café Sinceridade Gestão</h1>
     <p id="login-sub">Entre com suas credenciais para acessar o sistema.</p>
     <div id="login-fields">
       <div>
@@ -221,7 +230,7 @@
       <p id="login-error">Usuário ou senha incorretos. Tente novamente.</p>
       <button id="login-btn">Entrar →</button>
     </div>
-    <p id="login-footer">Café — Sistema interno de controle</p>
+    <p id="login-footer">Café Sinceridade — Sistema interno de controle</p>
   </div>
 </div>
 
@@ -229,10 +238,11 @@
 <div id="app">
   <header>
     <div class="header-left">
-      <h1>☕ Estoque &amp; Vendas</h1>
+      <h1>☕ Café Sinceridade Gestão</h1>
       <p><span id="sync-indicator"><span class="sync-dot off"></span>conectando...</span></p>
     </div>
     <div style="display:flex;align-items:center;gap:4px;">
+      <button id="btn-theme" title="Alternar tema claro/escuro" style="background:none;border:none;color:#C9B896;cursor:pointer;font-size:18px;padding:4px;opacity:.85;">🌙</button>
       <button id="btn-birthday" title="Aniversariantes de hoje" style="position:relative;background:none;border:none;color:#C9B896;cursor:pointer;font-size:18px;padding:4px;opacity:.85;">
         🎂<span id="birthday-dot"></span>
       </button>

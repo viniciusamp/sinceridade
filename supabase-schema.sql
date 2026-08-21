@@ -14,6 +14,12 @@ create table if not exists products (
   last_modified_by text,
   created_at timestamptz not null default now()
 );
+-- Custo de produção detalhado por componente (a coluna "cost" acima passa a
+-- ser sempre a SOMA dos três abaixo — continua existindo pra não quebrar o
+-- que já usa "cost", como o custo registrado em cada venda).
+alter table products add column if not exists cost_packaging numeric not null default 0; -- embalagem
+alter table products add column if not exists cost_roasting numeric not null default 0;  -- torra
+alter table products add column if not exists cost_stickers numeric not null default 0;  -- adesivos
 
 create table if not exists sales (
   id uuid primary key default gen_random_uuid(),

@@ -1,10 +1,38 @@
-# Estoque & Vendas — passo a passo
+# Café Sinceridade Gestão — passo a passo
 
 Este é um site pronto. Você só precisa: (1) criar o banco de dados no Supabase,
 (2) colar duas informações no arquivo `config.js`, e (3) publicar a pasta.
 Leva uns 10 minutos, sem precisar programar.
 
 ## Novidades desta versão
+
+- **Exportar relatórios em Excel (aba Resumo):** dois botões novos —
+  "Exportar vendas do mês" (planilha simples com as vendas do mês
+  selecionado) e "Exportar relatório completo" (uma pasta de trabalho com 4
+  abas: Resumo mensal, Vendas do mês, Estoque atual com markup de cada
+  produto, e Contas a Receber). Serve pra apurar números e acompanhar metas
+  fora do app, em ferramentas como Excel ou Google Sheets.
+- **Tema claro/escuro:** botão 🌙/☀️ no cabeçalho. A escolha fica salva no
+  navegador (cada aparelho lembra a preferência de quem usa nele).
+- **App renomeado para "Café Sinceridade Gestão"** — título da aba, tela de
+  login e cabeçalho atualizados.
+- **Caixa: agora dá pra excluir uma movimentação** registrada por engano.
+  Se for uma transferência entre caixas, apagar remove as duas pernas juntas
+  (senão o saldo consolidado ficaria errado).
+- **Estoque: quantidade só muda pela aba Movimentações.** Os botões de +/-
+  e a edição direta de quantidade no cadastro do produto foram removidos —
+  agora toda entrada ou saída de estoque **precisa** passar pela aba
+  Movimentações, o que gera automaticamente o registro de quem fez, quando
+  e por quê. A tela de Movimentações ganhou um botão único que alterna entre
+  Entrada e Saída.
+  - Produto novo nasce com estoque zerado — depois de criar, dê entrada na
+    quantidade inicial pela aba Movimentações.
+- **Custo de produção detalhado por produto:** ao invés de um campo único
+  de custo, agora você informa separadamente **Embalagem**, **Torra** e
+  **Adesivos** no cadastro do produto. O app soma tudo automaticamente e
+  mostra o **lucro, a margem e o markup** em tempo real conforme você digita
+  o preço de venda — clique em qualquer produto na aba Estoque pra ver/editar
+  isso.
 
 - **Caixa (nova aba) — livro-caixa de verdade.** Você cadastra os caixas que
   usa (ex.: Caixa BH, Caixa Manhuaçu, Banco, Pix) e o app mostra o saldo de
@@ -190,6 +218,11 @@ Leva uns 10 minutos, sem precisar programar.
   completo (aba Caixa). `cash_movements` guarda tipo, valor, descrição,
   caixa, data/hora, usuário, e a origem do lançamento (venda, recebimento,
   transferência ou manual) sem duplicar nada de `sales`/`receivables`.
+- Na tabela **products**: `cost_packaging`, `cost_roasting` e
+  `cost_stickers` (custo detalhado por componente). A coluna `cost` que já
+  existia continua lá — agora ela é sempre a **soma** dos três, pra não
+  quebrar nada que já usava o custo total (cálculo de lucro nas vendas,
+  Resumo, etc.).
 
 > Se você já usava uma versão antiga do app, rode o `supabase-schema.sql`
 > novamente — ele foi atualizado e cria as tabelas/colunas que faltavam. É
