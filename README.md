@@ -6,6 +6,22 @@ Leva uns 10 minutos, sem precisar programar.
 
 ## Novidades desta versão
 
+- **Contas a Receber ganhou um extrato de verdade.** Ao clicar no cliente,
+  agora aparece:
+  - **Total devido**, **saldo em aberto**, e um botão único **"Quitar
+    pagamento"** — você digita quanto o cliente está pagando agora (pode ser
+    parte do total, não precisa ser tudo de uma vez), escolhe a **forma de
+    pagamento**, o caixa que recebeu, e pronto. Se ele tiver mais de um
+    pedido em aberto, o valor abate primeiro os mais antigos, automático.
+  - **Extrato completo**, em ordem cronológica: cada compra à prazo aparece
+    como um débito (🧾, ligado ao número do pedido) e cada pagamento como um
+    crédito (💰, com a forma de pagamento e observação), cada linha
+    mostrando o **saldo acumulado** depois dela — assim dá pra ver a dívida
+    crescendo e diminuindo ao longo do tempo, tudo numa lista só.
+  - Continua dando pra quitar **um pedido específico** (botão pequeno em
+    cada compra do extrato), pra quando você quiser vincular o pagamento a
+    uma venda exata em vez de deixar o sistema escolher.
+
 - **Transferência entre localidades (Manhuaçu ↔ BH) virou uma operação de
   verdade.** Na aba Movimentações, o botão "+ Registrar entrada/saída"
   ganhou uma terceira opção: **🔁 Transferência**. Você escolhe o produto,

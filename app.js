@@ -614,6 +614,32 @@ async function registerReceivablePayment(receivable, amount, note, paymentMethod
   await db.from("receivables").update({ paid_amount: Number(newPaid.toFixed(2)), status }).eq("id", receivable.id);
 }
 
+// Quita um valor do total devido do cliente, sem precisar escolher um
+// pedido específico: aplica o valor nas contas em aberto mais antigas
+// primeiro (FIFO), pode quitar uma total e deixar outra parcial. Cada conta
+// tocada continua tendo seu próprio registro em receivable_payments (com a
+// mesma forma de pagamento/observação), então o extrato por pedido continua
+// certinho — só o jeito de pagar que fica mais simples pra quem só quer
+// "abater a dívida do cliente" sem se preocupar em qual pedido especificamente.
+async function registerClientPayment(group, amount, { paymentMethod, note, loggedBy }) {
+  let remaining = Math.max(0, Number(amount) || 0);
+  if (!remaining) return 0;
+  const openReceivables = state.receivables
+    .filter((r) => (r.client_id || `nome:${r.client_name}`) === group.key)
+    .filter((r) => Number(r.amount) - Number(r.paid_amount || 0) > 0.004)
+    .sort((a, b) => (a.created_at < b.created_at ? -1 : 1)); // mais antiga primeiro
+  let applied = 0;
+  for (const r of openReceivables) {
+    if (remaining <= 0.004) break;
+    const saldoR = Number((Number(r.amount) - Number(r.paid_amount || 0)).toFixed(2));
+    const apply = Math.min(saldoR, remaining);
+    await registerReceivablePayment(r, apply, note, paymentMethod);
+    remaining = Number((remaining - apply).toFixed(2));
+    applied = Number((applied + apply).toFixed(2));
+  }
+  return applied;
+}
+
 async function deleteReceivable(id) { await db.from("receivables").delete().eq("id", id); }
 
 function receivablePaymentsFor(receivableId) {
@@ -622,6 +648,31 @@ function receivablePaymentsFor(receivableId) {
 
 function receivableStatusLabel(status) {
   return status === "pago" ? "Pago" : status === "parcial" ? "Parcial" : "Em aberto";
+}
+
+// Extrato do cliente: junta compras (cada conta a receber = 1 débito) e
+// pagamentos (cada receivable_payment = 1 crédito) numa única linha do
+// tempo, com saldo corrido — é o "extrato de pagamentos" pedido.
+function clientStatementRows(group) {
+  const receivables = state.receivables.filter((r) => (r.client_id || `nome:${r.client_name}`) === group.key);
+  const events = [];
+  receivables.forEach((r) => {
+    events.push({ type: "compra", date: r.created_at, amount: Number(r.amount), saleGroupId: r.sale_group_id, receivableId: r.id });
+  });
+  receivables.forEach((r) => {
+    receivablePaymentsFor(r.id).forEach((p) => {
+      events.push({
+        type: "pagamento", date: p.paid_at, amount: Number(p.amount),
+        paymentMethod: p.payment_method, note: p.note, receivableId: r.id, saleGroupId: r.sale_group_id,
+      });
+    });
+  });
+  events.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  let running = 0;
+  return events.map((e) => {
+    running = Number((running + (e.type === "compra" ? e.amount : -e.amount)).toFixed(2));
+    return { ...e, runningBalance: running };
+  });
 }
 
 // ---- Clientes ----
@@ -1727,33 +1778,75 @@ function renderContasReceber() {
 function openClientReceivablesModal(group) {
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
-  const renderList = () => {
-    const items = state.receivables
-      .filter((r) => (r.client_id || `nome:${r.client_name}`) === group.key)
-      .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
-    return items.map((r) => {
-      const saldo = Number((Number(r.amount) - Number(r.paid_amount || 0)).toFixed(2));
-      const date = new Date(r.created_at).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" });
-      const payments = receivablePaymentsFor(r.id);
+
+  const currentGroup = () => receivablesByClient().find((g) => g.key === group.key) || { ...group, devido: 0, pago: 0, saldo: 0 };
+
+  const renderStatement = () => {
+    const g = currentGroup();
+    const rows = clientStatementRows(group);
+    const receivablesById = {};
+    state.receivables.forEach((r) => { receivablesById[r.id] = r; });
+
+    const rowsHtml = rows.length === 0 ? `<p style="font-size:13px;color:var(--muted2);">Nenhuma movimentação ainda.</p>` : rows.map((e) => {
+      const date = new Date(e.date).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" });
+      if (e.type === "compra") {
+        const r = receivablesById[e.receivableId];
+        const saldoR = r ? Number((Number(r.amount) - Number(r.paid_amount || 0)).toFixed(2)) : 0;
+        return `
+          <div class="rc-detail" data-rid="${e.receivableId}" style="align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--border);">
+            <span>
+              🧾 Compra${e.saleGroupId ? ` · Pedido #${orderNumber(e.saleGroupId)}` : ""}<br/>
+              <span style="font-size:11px;color:var(--muted2);">${date}${r ? ` · ${escapeHtml(receivableStatusLabel(r.status))}` : ""}</span>
+              <br/>
+              ${saldoR > 0.004 ? `<button class="btn btn-quitar-pedido" style="margin-top:4px;font-size:11px;padding:4px 8px;">Quitar este pedido (${money(saldoR)})</button>` : ""}
+              <button class="icon-btn danger btn-del-receivable" style="min-width:26px;min-height:26px;font-size:12px;padding:2px;margin-top:4px;" title="Excluir esta conta a receber">🗑</button>
+            </span>
+            <span style="text-align:right;flex-shrink:0;">
+              <b class="mono" style="color:var(--danger-text);">+${money(e.amount)}</b><br/>
+              <span style="font-size:11px;color:var(--muted2);">saldo ${money(e.runningBalance)}</span>
+            </span>
+          </div>`;
+      }
       return `
-        <div class="card" data-rid="${r.id}" style="margin-bottom:10px;">
-          <div class="row" style="align-items:flex-start;">
-            <div style="min-width:0;">
-              <p style="margin:0;font-size:12px;color:var(--muted2);">${date}${r.sale_group_id ? ` · Pedido #${orderNumber(r.sale_group_id)}` : ""}</p>
-              <p style="margin:2px 0 0;font-size:14px;">Total <span class="mono">${money(r.amount)}</span> · Pago <span class="mono">${money(r.paid_amount || 0)}</span></p>
-            </div>
-            <span class="badge badge-${r.status}">${receivableStatusLabel(r.status)}</span>
-          </div>
-          ${payments.length ? `
-            <div style="margin-top:8px;border-top:1px solid var(--border);padding-top:8px;display:flex;flex-direction:column;gap:2px;">
-              ${payments.map((p) => `<p style="margin:0;font-size:11px;color:var(--muted2);">${new Date(p.paid_at).toLocaleDateString("pt-BR")} · pagou ${money(p.amount)}${p.payment_method ? " via " + paymentLabel(p.payment_method) : ""}${p.note ? " · " + escapeHtml(p.note) : ""}</p>`).join("")}
-            </div>` : ""}
-          <div style="display:flex;gap:8px;margin-top:10px;">
-            ${saldo > 0.004 ? `<button class="btn btn-accent btn-pay" style="flex:1;font-size:13px;">Registrar pagamento (saldo ${money(saldo)})</button>` : ""}
-            <button class="icon-btn danger btn-del-receivable" title="Excluir">🗑</button>
-          </div>
+        <div class="rc-detail" style="align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--border);">
+          <span>
+            💰 Pagamento${e.paymentMethod ? " via " + escapeHtml(paymentLabel(e.paymentMethod)) : ""}<br/>
+            <span style="font-size:11px;color:var(--muted2);">${date}${e.note ? " · " + escapeHtml(e.note) : ""}</span>
+          </span>
+          <span style="text-align:right;flex-shrink:0;">
+            <b class="mono" style="color:var(--accent-dark);">−${money(e.amount)}</b><br/>
+            <span style="font-size:11px;color:var(--muted2);">saldo ${money(e.runningBalance)}</span>
+          </span>
         </div>`;
-    }).join("") || `<p style="font-size:13px;color:var(--muted2);">Nada por aqui.</p>`;
+    }).join("");
+
+    $("#crv-body", backdrop).innerHTML = `
+      <div class="grid2" style="margin-bottom:16px;">
+        <div class="metric"><div class="label">Total devido</div><div class="value mono">${money(g.devido)}</div></div>
+        <div class="metric"><div class="label">Saldo em aberto</div><div class="value mono" style="color:${g.saldo > 0.004 ? "var(--danger-text)" : "var(--accent-dark)"};">${money(g.saldo)}</div></div>
+      </div>
+      ${g.saldo > 0.004 ? `<button class="btn btn-accent btn-pay-total" style="width:100%;margin-bottom:18px;">Quitar pagamento (saldo ${money(g.saldo)})</button>` : ""}
+      <p style="font-size:13px;font-weight:500;color:var(--muted);margin:0 0 4px;">Extrato</p>
+      <div>${rowsHtml}</div>
+    `;
+
+    $(".btn-pay-total", backdrop) && ($(".btn-pay-total", backdrop).onclick = () => openClientPaymentModal(group, () => renderStatement()));
+    $$(".btn-quitar-pedido", backdrop).forEach((btn) => {
+      btn.onclick = () => {
+        const rid = btn.closest("[data-rid]").dataset.rid;
+        const receivable = state.receivables.find((r) => r.id === rid);
+        openRegisterPaymentModal(receivable, () => renderStatement());
+      };
+    });
+    $$(".btn-del-receivable", backdrop).forEach((btn) => {
+      btn.onclick = async () => {
+        const rid = btn.closest("[data-rid]").dataset.rid;
+        if (confirm("Excluir esta conta a receber? Isso não afeta a venda já registrada, só remove esse lançamento de dívida.")) {
+          await deleteReceivable(rid);
+          renderStatement();
+        }
+      };
+    });
   };
 
   backdrop.innerHTML = `
@@ -1762,30 +1855,78 @@ function openClientReceivablesModal(group) {
         <h3 class="serif" style="margin:0;font-size:17px;">${escapeHtml(group.clientName)}</h3>
         <button class="icon-btn" id="modal-close">✕</button>
       </div>
-      <div id="crv-list">${renderList()}</div>
+      <div id="crv-body"></div>
+    </div>`;
+  document.body.appendChild(backdrop);
+  backdrop.onclick = (e) => { if (e.target === backdrop) backdrop.remove(); };
+  $("#modal-close", backdrop).onclick = () => { backdrop.remove(); renderContasReceber(); };
+  renderStatement();
+}
+
+function openClientPaymentModal(group, onDone) {
+  const g = receivablesByClient().find((x) => x.key === group.key) || group;
+  const saldo = Number(g.saldo.toFixed(2));
+  const methods = PAYMENT_METHODS.filter((m) => m.value !== "prazo");
+  const lastOperator = localStorage.getItem("cafe_app_last_operator") || "";
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.style.zIndex = "60";
+  backdrop.innerHTML = `
+    <div class="modal">
+      <div class="row" style="margin-bottom:16px;">
+        <h3 class="serif" style="margin:0;font-size:17px;">Quitar pagamento</h3>
+        <button class="icon-btn" id="modal-close">✕</button>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:14px;">
+        <p style="margin:0;font-size:13px;color:var(--muted);">
+          Saldo devedor de ${escapeHtml(group.clientName)}: <b class="mono">${money(saldo)}</b><br/>
+          <span style="font-size:11px;">Se ele tiver mais de um pedido em aberto, o valor abate primeiro os mais antigos.</span>
+        </p>
+        <div><label class="field-label">Valor pago agora (R$)</label><input id="cp-amount" type="number" min="0.01" max="${saldo}" step="any" value="${saldo}" /></div>
+        <div><label class="field-label">Forma de pagamento</label>
+          <select id="cp-method">${methods.map((m) => `<option value="${m.value}" ${m.value === "dinheiro" ? "selected" : ""}>${m.label}</option>`).join("")}</select>
+        </div>
+        <div><label class="field-label">Caixa que recebeu</label>
+          <select id="cp-caixa">
+            <option value="">Não lançar no caixa</option>
+            ${state.cashRegisters.map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join("")}
+          </select>
+        </div>
+        <div><label class="field-label">Registrado por</label><input id="cp-operator" value="${escapeHtml(lastOperator)}" placeholder="seu nome" /></div>
+        <div><label class="field-label">Observação (opcional)</label><input id="cp-note" type="text" placeholder="ex: pagou parcelado" /></div>
+        <div style="display:flex;gap:8px;margin-top:6px;">
+          <button class="btn" id="modal-cancel" style="flex:1;">Cancelar</button>
+          <button class="btn btn-accent" id="modal-save" style="flex:1;">Confirmar</button>
+        </div>
+      </div>
     </div>`;
   document.body.appendChild(backdrop);
   backdrop.onclick = (e) => { if (e.target === backdrop) backdrop.remove(); };
   $("#modal-close", backdrop).onclick = () => backdrop.remove();
-
-  const wire = () => {
-    $$(".card[data-rid]", backdrop).forEach((card) => {
-      const rid = card.dataset.rid;
-      const receivable = state.receivables.find((r) => r.id === rid);
-      const payBtn = $(".btn-pay", card);
-      if (payBtn) payBtn.onclick = () => openRegisterPaymentModal(receivable, () => {
-        backdrop.remove();
-        renderContasReceber();
+  $("#modal-cancel", backdrop).onclick = () => backdrop.remove();
+  $("#modal-save", backdrop).onclick = async () => {
+    let amount = Number($("#cp-amount", backdrop).value) || 0;
+    if (amount <= 0) return;
+    if (amount > saldo + 0.004) {
+      alert(`O valor não pode ser maior que o saldo devedor (${money(saldo)}).`);
+      return;
+    }
+    const note = $("#cp-note", backdrop).value.trim();
+    const paymentMethod = $("#cp-method", backdrop).value;
+    const caixaId = $("#cp-caixa", backdrop).value;
+    const operator = $("#cp-operator", backdrop).value.trim();
+    if (operator) localStorage.setItem("cafe_app_last_operator", operator);
+    const applied = await registerClientPayment(group, amount, { paymentMethod, note, loggedBy: operator || null });
+    if (caixaId && applied > 0) {
+      await logCashMovement({
+        cashRegisterId: caixaId, movementType: "entrada", amount: applied,
+        description: `Recebimento — ${group.clientName}`,
+        originType: "recebimento", originId: null, loggedBy: operator || null, note,
       });
-      $(".btn-del-receivable", card).onclick = async () => {
-        if (confirm("Excluir esta conta a receber? Isso não afeta a venda já registrada.")) {
-          await deleteReceivable(rid);
-          backdrop.remove();
-        }
-      };
-    });
+    }
+    backdrop.remove();
+    onDone && onDone();
   };
-  wire();
 }
 
 function openRegisterPaymentModal(receivable, onDone) {
