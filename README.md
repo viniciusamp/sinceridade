@@ -4,8 +4,21 @@ Este é um site pronto. Você só precisa: (1) criar o banco de dados no Supabas
 (2) colar duas informações no arquivo `config.js`, e (3) publicar a pasta.
 Leva uns 10 minutos, sem precisar programar.
 
+## ⚠️ Ação obrigatória nesta atualização
+
+Esta versão trocou o login fixo por login de verdade (Supabase Auth) e
+fechou uma falha grave de segurança (o banco estava aberto pra qualquer
+pessoa com a URL do projeto). **Depois de rodar o `supabase-schema.sql`,
+o app só funciona se você criar pelo menos um usuário no painel do
+Supabase antes de tentar entrar** — veja o passo a passo completo na
+seção **"Sobre segurança"**, mais abaixo. Sem isso, ninguém consegue
+fazer login, nem você.
+
 ## Novidades desta versão
 
+- **Login de verdade + auditoria com protocolo.** Veja a seção "Sobre
+  segurança" no final deste documento — é a mudança mais importante desta
+  versão.
 - **Conciliação de recebimentos de BH direto na Transferência de Caixa.**
   Ao registrar uma **Transferência** na aba Caixa, além dos campos de
   sempre (origem, destino, valor, data, observação), agora tem:
@@ -292,6 +305,14 @@ Leva uns 10 minutos, sem precisar programar.
   transferência de caixa aos pedidos que ela conciliou (e por quanto cada
   um). Não duplica `receivables`/`receivable_payments` — só referencia,
   usando a mesma estrutura de contas a receber de sempre.
+- **Todas as políticas de acesso (RLS) foram trocadas** de "qualquer um
+  pode ler/escrever" para "só usuário autenticado". Sem login, a chave
+  `anon` sozinha não abre mais nenhum dado.
+- Tabela nova **profiles**: nome de exibição de cada usuário (criada
+  automaticamente quando você cadastra alguém no Supabase Auth).
+- Tabela nova **audit_log**: registro de auditoria com protocolo — grava
+  sozinha, via trigger do banco, toda vez que qualquer tabela de negócio é
+  criada/editada/apagada. Não é possível escrever nela pelo app.
 
 > Se você já usava uma versão antiga do app, rode o `supabase-schema.sql`
 > novamente — ele foi atualizado e cria as tabelas/colunas que faltavam. É
@@ -333,17 +354,68 @@ um aplicativo de verdade.
 
 ## Sobre segurança
 
-O app tem uma tela de login simples (usuário `admin`, senha definida no
-início do arquivo `app.js`, na constante `LOGIN_PASS`). **Essa senha só
-impede que alguém abra o app "sem querer"** — ela fica escrita no código
-que roda no navegador, então qualquer pessoa com um pouco de conhecimento
-técnico consegue ver o código-fonte da página e descobrir a senha, ou
-simplesmente acessar o banco de dados direto pela chave `anon` do
-`config.js`. Não é uma proteção real contra alguém que queira acessar os
-dados de propósito.
+O app agora usa **login de verdade**, com o sistema de autenticação do
+próprio Supabase (Supabase Auth). Cada pessoa tem sua própria conta
+(e-mail + senha), e o banco de dados **só libera acesso pra quem estiver
+logado** — antes, qualquer pessoa com a URL e a chave `anon` do
+`config.js` (que ficam visíveis no código do site) conseguia ler e alterar
+todos os dados direto pela API do Supabase, sem precisar nem abrir o site.
+Isso foi corrigido.
 
-Na prática, isso continua sendo um app privado de uso familiar: o link e a
-senha não devem ser compartilhados publicamente. Se um dia quiser uma
-segurança de verdade (login com conta própria para cada pessoa, senhas
-com hash, etc.), dá para evoluir o projeto usando o sistema de
-autenticação do Supabase — é só pedir.
+### Como criar um usuário novo (você + seu irmão, por exemplo)
+
+Isso é feito no **painel do Supabase**, não no app — é a única parte que
+não dá pra automatizar por segurança (só quem tem acesso ao painel do
+projeto pode criar contas, e é assim que deve ser).
+
+1. Entre em [supabase.com](https://supabase.com) → abra o projeto do
+   Café Sinceridade.
+2. No menu da esquerda, clique em **Authentication** → aba **Users**.
+3. Clique em **Add user** → **Create new user**.
+4. Preencha:
+   - **Email**: o e-mail da pessoa (é isso que ela vai digitar pra
+     entrar no app).
+   - **Password**: uma senha (pode trocar depois).
+   - Marque **Auto Confirm User** (importante — sem isso a conta fica
+     pendente de confirmação por e-mail, e como o projeto não tem envio
+     de e-mail configurado, ela nunca seria confirmada).
+5. Ainda nessa tela, em **User Metadata**, cole:
+   ```json
+   {"display_name": "Nome da pessoa"}
+   ```
+   Isso define o nome que aparece no app e na aba Auditoria. Se pular
+   esse passo, o app usa a parte antes do `@` do e-mail como nome.
+6. Clique em **Create user**. Pronto — a pessoa já consegue entrar no
+   site com esse e-mail e senha.
+
+Repita esse processo pra cada pessoa que for usar o sistema.
+
+### Auditoria — quem fez o quê
+
+Toda vez que alguém cria, edita ou apaga qualquer coisa no sistema
+(produto, venda, pagamento, movimentação de caixa, etc.), fica registrado
+automaticamente na aba **Auditoria**, com:
+
+- Um **número de protocolo** (ex.: `#A1B2C3`).
+- Quem fez, data e hora.
+- O que mudou (pra edições, mostra só os campos que realmente foram
+  alterados, com o valor de antes e depois).
+
+Esse registro é gravado **pelo próprio banco de dados** (não pelo app),
+então não existe como alguém burlar isso mexendo direto na API — mesmo
+que tentasse pular o aplicativo e mandar comandos direto pro Supabase, o
+registro de auditoria ainda seria criado.
+
+Não é possível editar nem apagar um registro de auditoria pelo app —
+propositalmente, pra manter o histórico confiável.
+
+### O que isso muda no dia a dia
+
+- O link do site continua público (no Netlify), e continua sendo assim
+  que você e seu irmão acessam de lugares diferentes — isso não muda.
+- A diferença é só na hora de entrar: agora é e-mail + senha de verdade,
+  em vez do usuário/senha fixos que ficavam escritos no código.
+- Os campos "quem está registrando" que apareciam em várias telas
+  (Movimentações, Caixa, Contas a Receber, etc.) foram removidos — o
+  sistema já sabe quem você é pelo login, então preenche isso sozinho,
+  automaticamente e sem depender de ninguém digitar o próprio nome certo.

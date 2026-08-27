@@ -205,56 +205,68 @@ alter table cash_registers enable row level security;
 alter table cash_movements enable row level security;
 alter table cash_transfer_allocations enable row level security;
 
--- Como é um app privado de uso familiar (sem login), liberamos acesso
--- completo para quem tiver a chave "anon" do projeto (que fica só no
--- código do site, não é pública na internet por si só).
+-- Como agora existe login de verdade (Supabase Auth), só libera acesso
+-- pra quem estiver autenticado — a chave "anon" sozinha não abre mais
+-- nada. Ver seção "Usuários e Auditoria" mais abaixo.
 drop policy if exists "allow all products" on products;
-create policy "allow all products" on products
-  for all using (true) with check (true);
+drop policy if exists "authenticated only products" on products;
+create policy "authenticated only products" on products
+  for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 
 drop policy if exists "allow all sales" on sales;
-create policy "allow all sales" on sales
-  for all using (true) with check (true);
+drop policy if exists "authenticated only sales" on sales;
+create policy "authenticated only sales" on sales
+  for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 
 drop policy if exists "allow all stock_entries" on stock_entries;
-create policy "allow all stock_entries" on stock_entries
-  for all using (true) with check (true);
+drop policy if exists "authenticated only stock_entries" on stock_entries;
+create policy "authenticated only stock_entries" on stock_entries
+  for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 
 drop policy if exists "allow all clients" on clients;
-create policy "allow all clients" on clients
-  for all using (true) with check (true);
+drop policy if exists "authenticated only clients" on clients;
+create policy "authenticated only clients" on clients
+  for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 
 drop policy if exists "allow all sellers" on sellers;
-create policy "allow all sellers" on sellers
-  for all using (true) with check (true);
+drop policy if exists "authenticated only sellers" on sellers;
+create policy "authenticated only sellers" on sellers
+  for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 
 drop policy if exists "allow all receivables" on receivables;
-create policy "allow all receivables" on receivables
-  for all using (true) with check (true);
+drop policy if exists "authenticated only receivables" on receivables;
+create policy "authenticated only receivables" on receivables
+  for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 
 drop policy if exists "allow all receivable_payments" on receivable_payments;
-create policy "allow all receivable_payments" on receivable_payments
-  for all using (true) with check (true);
+drop policy if exists "authenticated only receivable_payments" on receivable_payments;
+create policy "authenticated only receivable_payments" on receivable_payments
+  for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 
 drop policy if exists "allow all recompra_contacts" on recompra_contacts;
-create policy "allow all recompra_contacts" on recompra_contacts
-  for all using (true) with check (true);
+drop policy if exists "authenticated only recompra_contacts" on recompra_contacts;
+create policy "authenticated only recompra_contacts" on recompra_contacts
+  for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 
 drop policy if exists "allow all order_deliveries" on order_deliveries;
-create policy "allow all order_deliveries" on order_deliveries
-  for all using (true) with check (true);
+drop policy if exists "authenticated only order_deliveries" on order_deliveries;
+create policy "authenticated only order_deliveries" on order_deliveries
+  for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 
 drop policy if exists "allow all cash_registers" on cash_registers;
-create policy "allow all cash_registers" on cash_registers
-  for all using (true) with check (true);
+drop policy if exists "authenticated only cash_registers" on cash_registers;
+create policy "authenticated only cash_registers" on cash_registers
+  for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 
 drop policy if exists "allow all cash_movements" on cash_movements;
-create policy "allow all cash_movements" on cash_movements
-  for all using (true) with check (true);
+drop policy if exists "authenticated only cash_movements" on cash_movements;
+create policy "authenticated only cash_movements" on cash_movements
+  for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 
 drop policy if exists "allow all cash_transfer_allocations" on cash_transfer_allocations;
-create policy "allow all cash_transfer_allocations" on cash_transfer_allocations
-  for all using (true) with check (true);
+drop policy if exists "authenticated only cash_transfer_allocations" on cash_transfer_allocations;
+create policy "authenticated only cash_transfer_allocations" on cash_transfer_allocations
+  for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 
 -- Ativa atualização em tempo real (pra sincronizar entre os dois aparelhos)
 -- Usa bloco protegido porque, se a tabela já estiver na publicação
@@ -296,5 +308,138 @@ begin
   exception when others then null; end;
   begin
     alter publication supabase_realtime add table cash_transfer_allocations;
+  exception when others then null; end;
+end $$;
+
+-- ============================================================
+-- USUÁRIOS E AUDITORIA
+-- ============================================================
+-- A partir daqui o app usa login de verdade (Supabase Auth) em vez da
+-- senha fixa que ficava escrita no código. Cada pessoa tem sua própria
+-- conta (criada pelo painel do Supabase — veja o passo a passo no
+-- README). O RLS acima já foi travado pra só aceitar usuário autenticado.
+
+-- Nome de exibição de cada usuário (o Supabase Auth só guarda e-mail/senha;
+-- isso aqui é só o "nome bonito" que aparece no app e na auditoria).
+create table if not exists profiles (
+  id uuid primary key references auth.users(id) on delete cascade,
+  display_name text not null,
+  created_at timestamptz not null default now()
+);
+alter table profiles enable row level security;
+
+drop policy if exists "profiles select authenticated" on profiles;
+create policy "profiles select authenticated" on profiles
+  for select using (auth.role() = 'authenticated');
+
+drop policy if exists "profiles update own" on profiles;
+create policy "profiles update own" on profiles
+  for update using (auth.uid() = id) with check (auth.uid() = id);
+
+-- Cria automaticamente um "profile" (com nome de exibição) toda vez que
+-- uma conta nova é criada no Supabase Auth. Se você preencher o campo
+-- "User Metadata" com {"display_name": "Fulano"} na hora de criar o
+-- usuário no painel, esse nome é usado; senão, usa a parte antes do @
+-- do e-mail como nome padrão.
+create or replace function public.handle_new_user()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  insert into public.profiles (id, display_name)
+  values (new.id, coalesce(new.raw_user_meta_data->>'display_name', split_part(new.email, '@', 1)))
+  on conflict (id) do nothing;
+  return new;
+end;
+$$;
+
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute function public.handle_new_user();
+
+-- Log de auditoria: registra AUTOMATICAMENTE, direto no banco, toda vez
+-- que alguém cria/edita/apaga algo em qualquer tabela do sistema — com
+-- protocolo, quem fez, quando e o que mudou. Isso roda como um "gatilho"
+-- (trigger) do próprio Postgres, então funciona mesmo que alguém tente
+-- mexer direto na API sem passar pelo app — não dá pra burlar client-side.
+create table if not exists audit_log (
+  id uuid primary key default gen_random_uuid(),
+  protocol text not null,           -- código curto pra referência, tipo #A1B2C3
+  table_name text not null,
+  record_id uuid,
+  action text not null,             -- insert | update | delete
+  changed_by uuid references auth.users(id) on delete set null,
+  changed_by_name text,             -- guarda o nome também, pra não sumir se o usuário for removido depois
+  old_data jsonb,
+  new_data jsonb,
+  created_at timestamptz not null default now()
+);
+alter table audit_log enable row level security;
+
+drop policy if exists "audit_log select authenticated" on audit_log;
+create policy "audit_log select authenticated" on audit_log
+  for select using (auth.role() = 'authenticated');
+-- Ninguém pode inserir/editar/apagar manualmente — só o trigger grava aqui
+-- (ele roda como "security definer", com permissão própria, sem depender
+-- de o usuário ter permissão de escrita nessa tabela).
+
+create or replace function public.log_audit_event()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_user_id uuid := auth.uid();
+  v_user_name text;
+  v_protocol text := upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 6));
+begin
+  select display_name into v_user_name from public.profiles where id = v_user_id;
+
+  if tg_op = 'DELETE' then
+    insert into public.audit_log(protocol, table_name, record_id, action, changed_by, changed_by_name, old_data)
+    values (v_protocol, tg_table_name, old.id, 'delete', v_user_id, v_user_name, to_jsonb(old));
+    return old;
+  elsif tg_op = 'UPDATE' then
+    insert into public.audit_log(protocol, table_name, record_id, action, changed_by, changed_by_name, old_data, new_data)
+    values (v_protocol, tg_table_name, new.id, 'update', v_user_id, v_user_name, to_jsonb(old), to_jsonb(new));
+    return new;
+  else
+    insert into public.audit_log(protocol, table_name, record_id, action, changed_by, changed_by_name, new_data)
+    values (v_protocol, tg_table_name, new.id, 'insert', v_user_id, v_user_name, to_jsonb(new));
+    return new;
+  end if;
+end;
+$$;
+
+-- Liga o gatilho de auditoria em todas as tabelas de negócio do sistema.
+do $$
+declare
+  t text;
+begin
+  foreach t in array array[
+    'products','sales','stock_entries','clients','sellers',
+    'receivables','receivable_payments','recompra_contacts','order_deliveries',
+    'cash_registers','cash_movements','cash_transfer_allocations'
+  ]
+  loop
+    execute format('drop trigger if exists trg_audit_%1$s on %1$s;', t);
+    execute format(
+      'create trigger trg_audit_%1$s after insert or update or delete on %1$s for each row execute function public.log_audit_event();',
+      t
+    );
+  end loop;
+end $$;
+
+do $$
+begin
+  begin
+    alter publication supabase_realtime add table profiles;
+  exception when others then null; end;
+  begin
+    alter publication supabase_realtime add table audit_log;
   exception when others then null; end;
 end $$;

@@ -1,32 +1,64 @@
-// ---- Auth ----
-const LOGIN_USER  = "admin";
-const LOGIN_PASS  = "cafe123";
-const SESSION_KEY = "cafe_app_auth";
-const PIX_KEY     = "09156713606";
+// ---- Auth (Supabase Auth de verdade — cada pessoa com o próprio login) ----
+const PIX_KEY = "09156713606";
+let currentUser = null; // { id, email, displayName }
 
-(function initLogin() {
-  const screen = document.getElementById("login-screen");
-  if (sessionStorage.getItem(SESSION_KEY) === "1") { screen.style.display = "none"; return; }
+function showLoginScreen() {
+  document.getElementById("login-screen").style.display = "flex";
+}
+function hideLoginScreen() {
+  document.getElementById("login-screen").style.display = "none";
+}
+
+async function fetchCurrentUserProfile(authUser) {
+  const { data } = await db.from("profiles").select("display_name").eq("id", authUser.id).single();
+  currentUser = {
+    id: authUser.id, email: authUser.email,
+    displayName: (data && data.display_name) || (authUser.email || "").split("@")[0],
+  };
+}
+
+async function bootAfterLogin() {
+  hideLoginScreen();
+  state.loading = true;
+  render();
+  await loadAll();
+  subscribeRealtime();
+}
+
+function initLoginForm() {
   const userEl = document.getElementById("login-user");
   const passEl = document.getElementById("login-pass");
-  const errEl  = document.getElementById("login-error");
-  const tryLogin = () => {
+  const btnEl = document.getElementById("login-btn");
+  const errEl = document.getElementById("login-error");
+  const tryLogin = async () => {
     errEl.style.display = "none";
-    if (userEl.value.trim() === LOGIN_USER && passEl.value === LOGIN_PASS) {
-      sessionStorage.setItem(SESSION_KEY, "1");
-      screen.style.display = "none";
-    } else {
+    const email = userEl.value.trim();
+    const password = passEl.value;
+    if (!email || !password) return;
+    const originalText = btnEl.textContent;
+    btnEl.disabled = true;
+    btnEl.textContent = "Entrando...";
+    const { data, error } = await db.auth.signInWithPassword({ email, password });
+    btnEl.disabled = false;
+    btnEl.textContent = originalText;
+    if (error) {
       errEl.style.display = "block";
       passEl.value = "";
       passEl.focus();
+      return;
     }
+    await fetchCurrentUserProfile(data.user);
+    await bootAfterLogin();
   };
-  document.getElementById("login-btn").onclick = tryLogin;
+  btnEl.onclick = tryLogin;
   [userEl, passEl].forEach((el) => el.addEventListener("keydown", (e) => { if (e.key === "Enter") tryLogin(); }));
-})();
+}
 
-document.getElementById("btn-logout").onclick = () => {
-  if (confirm("Deseja sair?")) { sessionStorage.removeItem(SESSION_KEY); location.reload(); }
+document.getElementById("btn-logout").onclick = async () => {
+  if (confirm("Deseja sair?")) {
+    await db.auth.signOut();
+    location.reload();
+  }
 };
 
 // ---- Setup ----
@@ -50,6 +82,9 @@ let state = {
   tab: "estoque", products: [], sales: [], clients: [], sellers: [], cart: [],
   receivables: [], receivablePayments: [], recompraContacts: [], orderDeliveries: [], stockEntries: [],
   cashRegisters: [], cashMovements: [], cashTransferAllocations: [],
+  profiles: [], auditLog: [],
+  auditUser: "", auditTable: "", auditAction: "todos", auditPeriod: "todos",
+  auditCustomFrom: "", auditCustomTo: "",
   loading: true, loadError: null,
   resumoMonth: todayISOMonthPrefix(),
   recompraFilter: { window: "7", clientId: "", productName: "", status: "" },
@@ -345,6 +380,12 @@ async function loadAll() {
   const { data: cashTransferAllocations, error: e12 } = await db
     .from("cash_transfer_allocations").select("*").order("created_at", { ascending: false });
   if (e12) { console.warn("cash_transfer_allocations indisponível (rode o supabase-schema.sql):", e12.message); }
+  // Perfis (nome de exibição de cada usuário) e log de auditoria.
+  const { data: profiles, error: e13 } = await db.from("profiles").select("*");
+  if (e13) { console.warn("profiles indisponível (rode o supabase-schema.sql):", e13.message); }
+  const { data: auditLog, error: e14 } = await db
+    .from("audit_log").select("*").order("created_at", { ascending: false }).limit(500);
+  if (e14) { console.warn("audit_log indisponível (rode o supabase-schema.sql):", e14.message); }
   state.loadError = null;
   state.products = products || [];
   state.sales = sales || [];
@@ -358,6 +399,8 @@ async function loadAll() {
   state.cashRegisters = cashRegisters || [];
   state.cashMovements = cashMovements || [];
   state.cashTransferAllocations = cashTransferAllocations || [];
+  state.profiles = profiles || [];
+  state.auditLog = auditLog || [];
   state.loading = false;
   render();
   updateBirthdayDot();
@@ -378,6 +421,8 @@ function subscribeRealtime() {
     .on("postgres_changes", { event: "*", schema: "public", table: "cash_registers" }, loadAll)
     .on("postgres_changes", { event: "*", schema: "public", table: "cash_movements" }, loadAll)
     .on("postgres_changes", { event: "*", schema: "public", table: "cash_transfer_allocations" }, loadAll)
+    .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, loadAll)
+    .on("postgres_changes", { event: "*", schema: "public", table: "audit_log" }, loadAll)
     .subscribe((status) => {
       const label = $("#sync-indicator");
       if (!label) return;
@@ -946,6 +991,7 @@ function render() {
   if (state.tab === "caixa") renderCaixa();
   if (state.tab === "vendedores") renderVendedores();
   if (state.tab === "resumo") renderResumo();
+  if (state.tab === "auditoria") renderAuditoria();
   updateBirthdayDot();
 }
 
@@ -1603,11 +1649,8 @@ function openRecompraContactModal({ clientId, clientName, productId, productName
         <b>${escapeHtml(clientName)}</b>${productName ? ` · ${escapeHtml(productName)}` : ""}
       </p>
       ${last ? `<p style="font-size:12px;color:var(--muted2);margin:0 0 12px;">Último contato: ${fmtDateBR(last.contacted_at)}${last.contacted_by ? " · por " + escapeHtml(last.contacted_by) : ""}</p>` : ""}
+      <p style="font-size:12px;color:var(--muted);margin:0 0 14px;">Registrado por <b>${escapeHtml(currentUser.displayName)}</b></p>
       <div style="display:flex;flex-direction:column;gap:12px;">
-        <div>
-          <label class="field-label">Responsável pelo contato</label>
-          <select id="rc-by"></select>
-        </div>
         <div>
           <label class="field-label">Observação (opcional)</label>
           <input id="rc-note" placeholder="Ex.: cliente disse que ainda tem estoque" />
@@ -1620,17 +1663,13 @@ function openRecompraContactModal({ clientId, clientName, productId, productName
       </div>
     </div>`;
   document.body.appendChild(backdrop);
-  const bySel = $("#rc-by", backdrop);
-  bySel.innerHTML = `<option value="">— selecione —</option>` +
-    state.sellers.map((v) => `<option value="${escapeHtml(v.name)}">${escapeHtml(v.name)}</option>`).join("") +
-    `<option value="admin">admin</option>`;
   backdrop.onclick = (e) => { if (e.target === backdrop) backdrop.remove(); };
   $("#modal-close", backdrop).onclick = () => backdrop.remove();
   $("#modal-cancel", backdrop).onclick = () => backdrop.remove();
   $("#modal-save", backdrop).onclick = async () => {
     await addRecompraContact({
       clientId, clientName, productId, productName,
-      contactedBy: $("#rc-by", backdrop).value || null,
+      contactedBy: currentUser.displayName,
       note: $("#rc-note", backdrop).value.trim() || null,
     });
     backdrop.remove();
@@ -1945,7 +1984,6 @@ function openClientPaymentModal(group, onDone) {
   const g = receivablesByClient().find((x) => x.key === group.key) || group;
   const saldo = Number(g.saldo.toFixed(2));
   const methods = PAYMENT_METHODS.filter((m) => m.value !== "prazo");
-  const lastOperator = localStorage.getItem("cafe_app_last_operator") || "";
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
   backdrop.style.zIndex = "60";
@@ -1970,7 +2008,7 @@ function openClientPaymentModal(group, onDone) {
             ${state.cashRegisters.map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join("")}
           </select>
         </div>
-        <div><label class="field-label">Registrado por</label><input id="cp-operator" value="${escapeHtml(lastOperator)}" placeholder="seu nome" /></div>
+        <p style="margin:0;font-size:12px;color:var(--muted);">Registrado por <b>${escapeHtml(currentUser.displayName)}</b></p>
         <div><label class="field-label">Observação (opcional)</label><input id="cp-note" type="text" placeholder="ex: pagou parcelado" /></div>
         <div style="display:flex;gap:8px;margin-top:6px;">
           <button class="btn" id="modal-cancel" style="flex:1;">Cancelar</button>
@@ -1992,14 +2030,12 @@ function openClientPaymentModal(group, onDone) {
     const note = $("#cp-note", backdrop).value.trim();
     const paymentMethod = $("#cp-method", backdrop).value;
     const caixaId = $("#cp-caixa", backdrop).value;
-    const operator = $("#cp-operator", backdrop).value.trim();
-    if (operator) localStorage.setItem("cafe_app_last_operator", operator);
-    const applied = await registerClientPayment(group, amount, { paymentMethod, note, loggedBy: operator || null });
+    const applied = await registerClientPayment(group, amount, { paymentMethod, note, loggedBy: currentUser.displayName });
     if (caixaId && applied > 0) {
       await logCashMovement({
         cashRegisterId: caixaId, movementType: "entrada", amount: applied,
         description: `Recebimento — ${group.clientName}`,
-        originType: "recebimento", originId: null, loggedBy: operator || null, note,
+        originType: "recebimento", originId: null, loggedBy: currentUser.displayName, note,
       });
     }
     backdrop.remove();
@@ -2010,7 +2046,6 @@ function openClientPaymentModal(group, onDone) {
 function openRegisterPaymentModal(receivable, onDone) {
   const saldo = Number((Number(receivable.amount) - Number(receivable.paid_amount || 0)).toFixed(2));
   const methods = PAYMENT_METHODS.filter((m) => m.value !== "prazo");
-  const lastOperator = localStorage.getItem("cafe_app_last_operator") || "";
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
   backdrop.style.zIndex = "60";
@@ -2032,7 +2067,7 @@ function openRegisterPaymentModal(receivable, onDone) {
             ${state.cashRegisters.map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join("")}
           </select>
         </div>
-        <div><label class="field-label">Registrado por</label><input id="rp-operator" value="${escapeHtml(lastOperator)}" placeholder="seu nome" /></div>
+        <p style="margin:0;font-size:12px;color:var(--muted);">Registrado por <b>${escapeHtml(currentUser.displayName)}</b></p>
         <div><label class="field-label">Observação (opcional)</label><input id="rp-note" type="text" placeholder="ex: pagou parcelado" /></div>
         <div style="display:flex;gap:8px;margin-top:6px;">
           <button class="btn" id="modal-cancel" style="flex:1;">Cancelar</button>
@@ -2049,15 +2084,13 @@ function openRegisterPaymentModal(receivable, onDone) {
     const note = $("#rp-note", backdrop).value.trim();
     const paymentMethod = $("#rp-method", backdrop).value;
     const caixaId = $("#rp-caixa", backdrop).value;
-    const operator = $("#rp-operator", backdrop).value.trim();
     if (amount <= 0) return;
-    if (operator) localStorage.setItem("cafe_app_last_operator", operator);
     await registerReceivablePayment(receivable, amount, note, paymentMethod);
     if (caixaId) {
       await logCashMovement({
         cashRegisterId: caixaId, movementType: "entrada", amount,
         description: `Recebimento — ${receivable.client_name}`,
-        originType: "recebimento", originId: receivable.id, loggedBy: operator || null, note,
+        originType: "recebimento", originId: receivable.id, loggedBy: currentUser.displayName, note,
       });
     }
     backdrop.remove();
@@ -2205,7 +2238,6 @@ function renderPedidos() {
 }
 
 function openMarkDeliveredModal(order) {
-  const lastUsed = localStorage.getItem("cafe_app_last_delivery_user") || "";
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
   backdrop.innerHTML = `
@@ -2216,7 +2248,7 @@ function openMarkDeliveredModal(order) {
       </div>
       <p style="font-size:13px;color:var(--muted);margin:0 0 14px;">${escapeHtml(order.clientName || "Cliente à vista")}</p>
       <div style="display:flex;flex-direction:column;gap:14px;">
-        <div><label class="field-label">Quem está entregando/confirmando?</label><input id="od-user" value="${escapeHtml(lastUsed)}" placeholder="seu nome" /></div>
+        <p style="margin:0;font-size:12px;color:var(--muted);">Confirmado por <b>${escapeHtml(currentUser.displayName)}</b></p>
         <div><label class="field-label">Observação (opcional)</label><input id="od-note" placeholder="ex: retirado na loja" /></div>
         <div style="display:flex;gap:8px;margin-top:6px;">
           <button class="btn" id="modal-cancel" style="flex:1;">Cancelar</button>
@@ -2229,10 +2261,8 @@ function openMarkDeliveredModal(order) {
   $("#modal-close", backdrop).onclick = () => backdrop.remove();
   $("#modal-cancel", backdrop).onclick = () => backdrop.remove();
   $("#modal-save", backdrop).onclick = async () => {
-    const deliveredBy = $("#od-user", backdrop).value.trim();
     const note = $("#od-note", backdrop).value.trim();
-    if (deliveredBy) localStorage.setItem("cafe_app_last_delivery_user", deliveredBy);
-    await markOrderDelivered(order, { deliveredBy, note });
+    await markOrderDelivered(order, { deliveredBy: currentUser.displayName, note });
     backdrop.remove();
   };
 }
@@ -2281,7 +2311,6 @@ function movementUsers() {
 
 async function openStockEntryModal() {
   if (!state.products.length) { alert("Cadastre um produto no estoque antes de registrar uma movimentação."); return; }
-  const lastUser = localStorage.getItem("cafe_app_last_stock_user") || "";
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
   backdrop.innerHTML = `<div class="modal" id="se-modal-body"></div>`;
@@ -2333,7 +2362,7 @@ async function openStockEntryModal() {
             </div>
           </div>
         `}
-        <div><label class="field-label">Quem está registrando?</label><input id="se-user" value="${escapeHtml(lastUser)}" placeholder="seu nome" /></div>
+        <p style="margin:0;font-size:12px;color:var(--muted);">Registrado por <b>${escapeHtml(currentUser.displayName)}</b></p>
         <div><label class="field-label">Observação (opcional)</label><input id="se-note" placeholder="ex: nota fiscal 1234" /></div>
         <div style="display:flex;gap:8px;margin-top:6px;">
           <button class="btn" id="modal-cancel" style="flex:1;">Cancelar</button>
@@ -2355,10 +2384,9 @@ async function openStockEntryModal() {
     $("#modal-save", backdrop).onclick = async () => {
       const product = state.products.find((p) => p.id === $("#se-product", backdrop).value);
       const quantity = Number($("#se-qty", backdrop).value) || 0;
-      const loggedBy = $("#se-user", backdrop).value.trim();
+      const loggedBy = currentUser.displayName;
       const note = $("#se-note", backdrop).value.trim();
       if (!product || quantity <= 0) return;
-      if (loggedBy) localStorage.setItem("cafe_app_last_stock_user", loggedBy);
 
       if (type === "transferencia") {
         const fromLocation = $("#se-from", backdrop).value;
@@ -2602,7 +2630,6 @@ function openCashRegisterModal(register) {
 
 function openCashMovementModal() {
   if (!state.cashRegisters.length) { alert("Cadastre um caixa primeiro (botão \"+ Novo caixa\")."); return; }
-  const lastOperator = localStorage.getItem("cafe_app_last_operator") || "";
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
   backdrop.innerHTML = `<div class="modal" id="cm-modal-body" style="max-width:460px;"></div>`;
@@ -2717,7 +2744,7 @@ function openCashMovementModal() {
           <div><label class="field-label">${type === "transferencia" ? "Valor total recebido (R$)" : "Valor (R$)"}</label><input id="cm-amount" type="number" min="0.01" step="any" placeholder="0,00" /></div>
           <div><label class="field-label">Data ${type === "transferencia" ? "da transferência" : "e hora"}</label><input id="cm-datetime" type="datetime-local" value="${nowForDatetimeLocal()}" /></div>
         </div>
-        <div><label class="field-label">${type === "transferencia" ? "Origem / Responsável" : "Operador"}</label><input id="cm-operator" value="${escapeHtml(lastOperator)}" placeholder="seu nome" /></div>
+        <div><label class="field-label">${type === "transferencia" ? "Origem / Responsável" : "Registrado por"}</label><p style="margin:8px 0 0;font-size:13px;"><b>${escapeHtml(currentUser.displayName)}</b></p></div>
         <div><label class="field-label">Observação (opcional)</label><input id="cm-note" placeholder="" /></div>
         ${type === "transferencia" ? `
           <div>
@@ -2744,16 +2771,15 @@ function openCashMovementModal() {
     $("#cm-save", backdrop).onclick = async () => {
       const amount = Number($("#cm-amount", backdrop).value) || 0;
       const occurredAt = $("#cm-datetime", backdrop).value ? new Date($("#cm-datetime", backdrop).value).toISOString() : new Date().toISOString();
-      const operator = $("#cm-operator", backdrop).value.trim();
+      const operator = currentUser.displayName;
       const note = $("#cm-note", backdrop).value.trim();
       if (amount <= 0) return;
-      if (operator) localStorage.setItem("cafe_app_last_operator", operator);
 
       if (type === "transferencia") {
         const fromId = $("#cm-from", backdrop).value;
         const toId = $("#cm-to", backdrop).value;
         if (!fromId || !toId || fromId === toId) { alert("Escolha dois caixas diferentes."); return; }
-        const transferGroupId = await registerCashTransfer({ fromRegisterId: fromId, toRegisterId: toId, amount, note, loggedBy: operator || null, occurredAt });
+        const transferGroupId = await registerCashTransfer({ fromRegisterId: fromId, toRegisterId: toId, amount, note, loggedBy: operator, occurredAt });
         const orders = bhOpenOrders();
         const allocations = Object.entries(selectedAlloc)
           .filter(([, v]) => Number(v) > 0)
@@ -2782,7 +2808,7 @@ function openCashMovementModal() {
         if (!registerId || !description) return;
         await logCashMovement({
           cashRegisterId: registerId, movementType: type, amount, description,
-          originType: "manual", loggedBy: operator || null, note, occurredAt,
+          originType: "manual", loggedBy: operator, note, occurredAt,
         });
       }
       backdrop.remove();
@@ -3217,6 +3243,173 @@ function renderResumo() {
   $("#btn-export-full").onclick = () => exportFullReportExcel();
 }
 
+// ---- Auditoria ----
+// Não tem edição nem exclusão aqui de propósito — o log é escrito
+// diretamente pelo banco (trigger), então nem o app tem como apagar ou
+// alterar um registro de auditoria. É só leitura.
+const AUDIT_TABLE_LABELS = {
+  products: "Produto", sales: "Venda", stock_entries: "Movimentação de estoque",
+  clients: "Cliente", sellers: "Vendedor", receivables: "Conta a receber",
+  receivable_payments: "Pagamento de conta a receber", recompra_contacts: "Contato de recompra",
+  order_deliveries: "Entrega de pedido", cash_registers: "Caixa", cash_movements: "Movimentação de caixa",
+  cash_transfer_allocations: "Conciliação de transferência",
+};
+const AUDIT_ACTION_LABELS = { insert: "Criou", update: "Editou", delete: "Excluiu" };
+const AUDIT_ACTION_ICON = { insert: "➕", update: "✎", delete: "🗑" };
+
+function auditTableLabel(t) { return AUDIT_TABLE_LABELS[t] || t; }
+
+function filteredAuditLog() {
+  const [from, to] = periodRange(state.auditPeriod, state.auditCustomFrom, state.auditCustomTo);
+  return state.auditLog.filter((a) => {
+    const t = new Date(a.created_at);
+    if (from && t < from) return false;
+    if (to && t > to) return false;
+    if (state.auditUser && a.changed_by !== state.auditUser) return false;
+    if (state.auditTable && a.table_name !== state.auditTable) return false;
+    if (state.auditAction !== "todos" && a.action !== state.auditAction) return false;
+    return true;
+  });
+}
+
+// Pra UPDATE, mostra só os campos que realmente mudaram (comparando
+// old_data x new_data), em vez de um JSON gigante ilegível.
+function auditChangedFields(entry) {
+  if (entry.action === "insert") {
+    return Object.entries(entry.new_data || {}).filter(([k]) => k !== "id" && k !== "created_at");
+  }
+  if (entry.action === "delete") {
+    return Object.entries(entry.old_data || {}).filter(([k]) => k !== "id" && k !== "created_at");
+  }
+  const oldData = entry.old_data || {};
+  const newData = entry.new_data || {};
+  const changed = [];
+  Object.keys(newData).forEach((k) => {
+    if (k === "id" || k === "created_at") return;
+    const before = oldData[k];
+    const after = newData[k];
+    if (JSON.stringify(before) !== JSON.stringify(after)) changed.push([k, after, before]);
+  });
+  return changed;
+}
+
+function fmtAuditValue(v) {
+  if (v === null || v === undefined) return "—";
+  if (typeof v === "boolean") return v ? "sim" : "não";
+  return String(v);
+}
+
+function openAuditDetailModal(entry) {
+  const fields = auditChangedFields(entry);
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `
+    <div class="modal">
+      <div class="row" style="margin-bottom:16px;">
+        <h3 class="serif" style="margin:0;font-size:17px;">Protocolo #${escapeHtml(entry.protocol)}</h3>
+        <button class="icon-btn" id="modal-close">✕</button>
+      </div>
+      <p style="margin:0 0 4px;font-size:13px;color:var(--muted);">
+        ${AUDIT_ACTION_ICON[entry.action] || ""} ${escapeHtml(AUDIT_ACTION_LABELS[entry.action] || entry.action)} em <b>${escapeHtml(auditTableLabel(entry.table_name))}</b>
+      </p>
+      <p style="margin:0 0 16px;font-size:12px;color:var(--muted2);">
+        ${new Date(entry.created_at).toLocaleString("pt-BR")} · por ${escapeHtml(entry.changed_by_name || "—")}
+      </p>
+      ${fields.length === 0 ? `<p style="font-size:13px;color:var(--muted2);">Nenhum detalhe adicional.</p>` : `
+        <div style="display:flex;flex-direction:column;gap:6px;max-height:360px;overflow-y:auto;">
+          ${fields.map(([k, after, before]) => `
+            <div class="rc-detail" style="align-items:flex-start;">
+              <span style="color:var(--muted);">${escapeHtml(k)}</span>
+              <span style="text-align:right;">
+                ${entry.action === "update"
+                  ? `<span style="color:var(--muted2);text-decoration:line-through;">${escapeHtml(fmtAuditValue(before))}</span><br/><b>${escapeHtml(fmtAuditValue(after))}</b>`
+                  : `<b>${escapeHtml(fmtAuditValue(after))}</b>`}
+              </span>
+            </div>`).join("")}
+        </div>`}
+    </div>`;
+  document.body.appendChild(backdrop);
+  backdrop.onclick = (e) => { if (e.target === backdrop) backdrop.remove(); };
+  $("#modal-close", backdrop).onclick = () => backdrop.remove();
+}
+
+function renderAuditoria() {
+  const list = filteredAuditLog();
+  const tableOptions = Array.from(new Set(state.auditLog.map((a) => a.table_name))).sort((a, b) => auditTableLabel(a).localeCompare(auditTableLabel(b), "pt-BR"));
+
+  $("#main").innerHTML = `
+    <div class="grid2" style="margin-bottom:16px;">
+      <div class="metric"><div class="label">📋 Registros no período</div><div class="value mono">${list.length}</div></div>
+      <div class="metric"><div class="label">👤 Você está logado como</div><div class="value" style="font-size:15px;">${escapeHtml(currentUser.displayName)}</div></div>
+    </div>
+
+    <p style="font-size:11px;font-weight:600;color:var(--muted2);text-transform:uppercase;letter-spacing:.04em;margin:0 0 6px;">Período</p>
+    <div class="rc-filter-pills" style="margin-bottom:10px;">
+      ${MOV_PERIODS.map((o) => `<button class="rc-pill audit-period-pill ${state.auditPeriod === o.id ? "active" : ""}" data-period="${o.id}">${o.label}</button>`).join("")}
+    </div>
+    ${state.auditPeriod === "personalizado" ? `
+      <div class="grid2" style="margin-bottom:10px;">
+        <div><label class="field-label">De</label><input id="audit-from" type="date" value="${state.auditCustomFrom}" /></div>
+        <div><label class="field-label">Até</label><input id="audit-to" type="date" value="${state.auditCustomTo}" /></div>
+      </div>` : ""}
+
+    <div class="grid2" style="margin-bottom:10px;">
+      <div><label class="field-label">Usuário</label>
+        <select id="audit-user">
+          <option value="">Todos</option>
+          ${state.profiles.map((p) => `<option value="${p.id}" ${state.auditUser === p.id ? "selected" : ""}>${escapeHtml(p.display_name)}</option>`).join("")}
+        </select>
+      </div>
+      <div><label class="field-label">Tabela</label>
+        <select id="audit-table">
+          <option value="">Todas</option>
+          ${tableOptions.map((t) => `<option value="${t}" ${state.auditTable === t ? "selected" : ""}>${escapeHtml(auditTableLabel(t))}</option>`).join("")}
+        </select>
+      </div>
+    </div>
+    <div style="margin-bottom:18px;">
+      <label class="field-label">Ação</label>
+      <select id="audit-action">
+        <option value="todos" ${state.auditAction === "todos" ? "selected" : ""}>Todas</option>
+        <option value="insert" ${state.auditAction === "insert" ? "selected" : ""}>Criações</option>
+        <option value="update" ${state.auditAction === "update" ? "selected" : ""}>Edições</option>
+        <option value="delete" ${state.auditAction === "delete" ? "selected" : ""}>Exclusões</option>
+      </select>
+    </div>
+
+    ${list.length === 0 ? `<div class="empty">Nenhum registro nessa condição.</div>` : `
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        ${list.slice(0, 200).map((a) => `
+          <div class="card btn-audit-detail" data-id="${a.id}" style="padding:10px 12px;cursor:pointer;">
+            <div class="row" style="align-items:flex-start;">
+              <div style="min-width:0;">
+                <p style="margin:0;font-size:14px;">${AUDIT_ACTION_ICON[a.action] || ""} ${escapeHtml(AUDIT_ACTION_LABELS[a.action] || a.action)} · ${escapeHtml(auditTableLabel(a.table_name))}</p>
+                <p style="margin:2px 0 0;font-size:12px;color:var(--muted2);">
+                  ${new Date(a.created_at).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+                  · ${escapeHtml(a.changed_by_name || "—")}
+                </p>
+              </div>
+              <span class="mono" style="font-size:12px;color:var(--muted2);flex-shrink:0;">#${escapeHtml(a.protocol)}</span>
+            </div>
+          </div>`).join("")}
+      </div>
+      ${list.length > 200 ? `<p style="font-size:12px;color:var(--muted2);margin-top:10px;text-align:center;">Mostrando os 200 mais recentes desse filtro. Restrinja o período pra ver os demais.</p>` : ""}`}
+  `;
+
+  $$(".audit-period-pill", $("#main")).forEach((btn) => { btn.onclick = () => { state.auditPeriod = btn.dataset.period; renderAuditoria(); }; });
+  $("#audit-from") && ($("#audit-from").onchange = (e) => { state.auditCustomFrom = e.target.value; renderAuditoria(); });
+  $("#audit-to") && ($("#audit-to").onchange = (e) => { state.auditCustomTo = e.target.value; renderAuditoria(); });
+  $("#audit-user").onchange = (e) => { state.auditUser = e.target.value; renderAuditoria(); };
+  $("#audit-table").onchange = (e) => { state.auditTable = e.target.value; renderAuditoria(); };
+  $("#audit-action").onchange = (e) => { state.auditAction = e.target.value; renderAuditoria(); };
+  $$(".btn-audit-detail", $("#main")).forEach((card) => {
+    card.onclick = () => {
+      const entry = state.auditLog.find((a) => a.id === card.dataset.id);
+      if (entry) openAuditDetailModal(entry);
+    };
+  });
+}
+
 function escapeHtml(str) {
   const d = document.createElement("div");
   d.textContent = str;
@@ -3226,22 +3419,39 @@ function escapeHtml(str) {
 // ---- Init ----
 $$("#tabs button").forEach((btn) => { btn.onclick = () => { state.tab = btn.dataset.tab; render(); }; });
 
-try {
-  if (configOk) {
-    if (!window.supabase || !window.supabase.createClient) {
-      throw new Error("A biblioteca do Supabase não carregou (verifique sua conexão com a internet, bloqueador de anúncios, ou tente outro navegador).");
+async function boot() {
+  try {
+    if (configOk) {
+      if (!window.supabase || !window.supabase.createClient) {
+        throw new Error("A biblioteca do Supabase não carregou (verifique sua conexão com a internet, bloqueador de anúncios, ou tente outro navegador).");
+      }
+      db = window.supabase.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY);
     }
-    db = window.supabase.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY);
+  } catch (err) {
+    console.error(err);
+    state.loadError = err.message;
+    state.loading = false;
   }
-} catch (err) {
-  console.error(err);
-  state.loadError = err.message;
-  state.loading = false;
+
+  render();
+  if (!configOk || !db) {
+    hideLoginScreen(); // deixa o erro de configuração visível em #main, em vez de escondido atrás da tela de login
+    return;
+  }
+
+  initLoginForm();
+
+  const { data: sessionData } = await db.auth.getSession();
+  if (sessionData && sessionData.session && sessionData.session.user) {
+    await fetchCurrentUserProfile(sessionData.session.user);
+    await bootAfterLogin();
+  } else {
+    showLoginScreen();
+  }
+
+  db.auth.onAuthStateChange((event) => {
+    if (event === "SIGNED_OUT") location.reload();
+  });
 }
 
-render();
-
-if (configOk && db && !state.loadError) {
-  loadAll();
-  subscribeRealtime();
-}
+boot();
