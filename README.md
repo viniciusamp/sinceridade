@@ -6,6 +6,24 @@ Leva uns 10 minutos, sem precisar programar.
 
 ## Novidades desta versão
 
+- **Transferência entre localidades (Manhuaçu ↔ BH) virou uma operação de
+  verdade.** Na aba Movimentações, o botão "+ Registrar entrada/saída"
+  ganhou uma terceira opção: **🔁 Transferência**. Você escolhe o produto,
+  de qual localidade sai e pra qual vai, e o app:
+  - **subtrai automaticamente** da localidade de origem e **soma** na de
+    destino (é o mesmo produto só mudando de lugar — o estoque total dele
+    não muda);
+  - gera um **protocolo** (um número, tipo `#A1B2C3`) que liga as duas
+    pontas do movimento, então dá pra rastrear a transferência inteira;
+  - registra **quem fez**, quando, e uma observação opcional.
+  - No livro-caixa de estoque, essa movimentação aparece com 🔁 e mostra
+    "Transferência para/de [localidade] · Protocolo #...". Excluir uma
+    transferência remove as duas pontas juntas, pra não sobrar um registro
+    pela metade.
+  - Transferências não contam nos totais de "Entradas"/"Saídas" nem no
+    relatório por usuário (item 12) — senão inflaria os números, já que não
+    é uma compra nem um consumo de verdade, só reorganização interna.
+
 - **Exportar relatórios em Excel (aba Resumo):** dois botões novos —
   "Exportar vendas do mês" (planilha simples com as vendas do mês
   selecionado) e "Exportar relatório completo" (uma pasta de trabalho com 4
@@ -210,8 +228,9 @@ Leva uns 10 minutos, sem precisar programar.
   pedido (usada pela aba Pedidos). Não duplica vendas nem mexe em estoque.
 - Na tabela **stock_entries** (já existia, mas agora é usada de verdade):
   `movement_type` (entrada/saída), `location`, `order_key` (pedido
-  relacionado, quando a saída vem de uma venda) e `reason` (motivo). É o que
-  alimenta a nova aba Movimentações.
+  relacionado, quando a saída vem de uma venda), `reason` (motivo),
+  `transfer_group_id` e `related_location` (protocolo e localidade "do outro
+  lado" de uma transferência). É o que alimenta a aba Movimentações.
 - Na tabela **receivable_payments**: `payment_method` (forma de pagamento
   usada em cada quitação — Pix/Dinheiro/Cartão).
 - Tabelas novas **cash_registers** e **cash_movements**: o livro-caixa

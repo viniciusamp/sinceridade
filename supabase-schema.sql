@@ -57,6 +57,11 @@ alter table stock_entries add column if not exists movement_type text not null d
 alter table stock_entries add column if not exists location text; -- Manhuaçu | BH
 alter table stock_entries add column if not exists order_key uuid; -- pedido relacionado, quando a saída vem de uma venda
 alter table stock_entries add column if not exists reason text; -- motivo (Venda, Compra de fornecedor, Ajuste, etc.)
+-- Transferência entre localidades: liga as duas pontas (saída numa
+-- localidade + entrada na outra) com um mesmo protocolo, igual ao que já
+-- existe pra transferência entre caixas.
+alter table stock_entries add column if not exists transfer_group_id uuid; -- protocolo que liga as duas pontas da transferência
+alter table stock_entries add column if not exists related_location text; -- a "outra" localidade envolvida na transferência
 
 -- Clientes
 create table if not exists clients (

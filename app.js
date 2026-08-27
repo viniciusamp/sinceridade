@@ -401,18 +401,25 @@ async function updateProduct(id, data) {
 }
 async function deleteProduct(id) { await db.from("products").delete().eq("id", id); }
 
-async function logStockMovement({ productId, productName, unit, movementType, quantity, location, orderKey, reason, note, loggedBy, unitCost }) {
+async function logStockMovement({ productId, productName, unit, movementType, quantity, location, orderKey, reason, note, loggedBy, unitCost, transferGroupId, relatedLocation }) {
   await db.from("stock_entries").insert({
     product_id: productId || null, product_name: productName, unit: unit || null,
     quantity: Math.abs(Number(quantity) || 0),
     unit_cost: Number(unitCost) || 0, total_cost: (Number(unitCost) || 0) * Math.abs(Number(quantity) || 0),
     note: note || null, logged_by: loggedBy || null,
     movement_type: movementType, location: location || null, order_key: orderKey || null, reason: reason || null,
+    transfer_group_id: transferGroupId || null, related_location: relatedLocation || null,
   });
 }
 
 async function deleteStockMovement(id) {
-  await db.from("stock_entries").delete().eq("id", id);
+  const m = state.stockEntries.find((x) => x.id === id);
+  if (m && m.transfer_group_id) {
+    // Apaga as duas pontas do protocolo juntas, senão fica um registro "órfão".
+    await db.from("stock_entries").delete().eq("transfer_group_id", m.transfer_group_id);
+  } else {
+    await db.from("stock_entries").delete().eq("id", id);
+  }
 }
 
 // ---- Caixa (livro-caixa) ----
@@ -504,6 +511,37 @@ async function registerStockExit({ product, quantity, location, reason, note, lo
     movementType: "saida", quantity, location: locName(location),
     reason: reason || "Ajuste de estoque", note, loggedBy,
   });
+}
+
+// Transferência entre localidades (Manhuaçu ↔ BH) do MESMO produto: retira
+// de uma e coloca na outra numa única operação, e gera um protocolo
+// (transfer_group_id) que liga as duas pontas do movimento — igual ao que
+// já existe pra transferência entre caixas.
+async function registerStockTransfer({ product, quantity, fromLocation, toLocation, note, loggedBy }) {
+  if (!product || fromLocation === toLocation || !(Number(quantity) > 0)) return;
+  const fromCol = fromLocation === "bh" ? "qty_bh" : "qty_mhu";
+  const toCol = toLocation === "bh" ? "qty_bh" : "qty_mhu";
+  const nextFrom = Math.max(0, Number((Number(product[fromCol] || 0) - Number(quantity)).toFixed(3)));
+  const nextTo = Number((Number(product[toCol] || 0) + Number(quantity)).toFixed(3));
+  await db.from("products").update({
+    [fromCol]: nextFrom, [toCol]: nextTo,
+    quantity: Number((nextFrom + nextTo).toFixed(3)), // total do produto não muda, só é redistribuído
+  }).eq("id", product.id);
+
+  const transferGroupId = crypto.randomUUID();
+  await logStockMovement({
+    productId: product.id, productName: product.name, unit: product.unit,
+    movementType: "saida", quantity, location: locName(fromLocation),
+    reason: "Transferência entre localidades", note, loggedBy,
+    transferGroupId, relatedLocation: locName(toLocation),
+  });
+  await logStockMovement({
+    productId: product.id, productName: product.name, unit: product.unit,
+    movementType: "entrada", quantity, location: locName(toLocation),
+    reason: "Transferência entre localidades", note, loggedBy,
+    transferGroupId, relatedLocation: locName(fromLocation),
+  });
+  return transferGroupId;
 }
 
 async function registerSale(product, qty, { paymentMethod, discount, location, clientId, clientName, sellerId, sellerName, saleGroupId }) {
@@ -2011,7 +2049,8 @@ function filteredMovements() {
     if (state.movProduct && m.product_id !== state.movProduct) return false;
     if (state.movUser && (m.logged_by || "").toLowerCase() !== state.movUser.toLowerCase()) return false;
     if (state.movLocation && m.location !== state.movLocation) return false;
-    if (state.movType !== "todos" && m.movement_type !== state.movType) return false;
+    if (state.movType === "transferencia" && !m.transfer_group_id) return false;
+    if (state.movType !== "todos" && state.movType !== "transferencia" && m.movement_type !== state.movType) return false;
     return true;
   }).sort((a, b) => (a.entered_at < b.entered_at ? 1 : -1));
 }
@@ -2030,9 +2069,9 @@ async function openStockEntryModal() {
   document.body.appendChild(backdrop);
   backdrop.onclick = (e) => { if (e.target === backdrop) backdrop.remove(); };
 
-  let type = "entrada"; // entrada | saida
-  const entryReasons = ["Compra de fornecedor", "Transferência entre localidades", "Ajuste de estoque", "Outro"];
-  const exitReasons = ["Perda/quebra", "Uso interno", "Transferência entre localidades", "Ajuste de estoque", "Outro"];
+  let type = "entrada"; // entrada | saida | transferencia
+  const entryReasons = ["Compra de fornecedor", "Ajuste de estoque", "Outro"];
+  const exitReasons = ["Perda/quebra", "Uso interno", "Ajuste de estoque", "Outro"];
 
   function paint() {
     const reasons = type === "entrada" ? entryReasons : exitReasons;
@@ -2044,24 +2083,37 @@ async function openStockEntryModal() {
       <div class="rc-filter-pills" style="margin-bottom:14px;">
         <button class="rc-pill se-type-pill ${type === "entrada" ? "active" : ""}" data-type="entrada">📥 Entrada</button>
         <button class="rc-pill se-type-pill ${type === "saida" ? "active" : ""}" data-type="saida">📤 Saída</button>
+        <button class="rc-pill se-type-pill ${type === "transferencia" ? "active" : ""}" data-type="transferencia">🔁 Transferência</button>
       </div>
       <div style="display:flex;flex-direction:column;gap:12px;">
         <div>
           <label class="field-label">Produto</label>
           <select id="se-product">${state.products.map((p) => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join("")}</select>
         </div>
-        <div class="grid2">
+        ${type === "transferencia" ? `
+          <div class="grid2">
+            <div><label class="field-label">De</label>
+              <select id="se-from"><option value="mhu">Manhuaçu</option><option value="bh">BH</option></select>
+            </div>
+            <div><label class="field-label">Para</label>
+              <select id="se-to"><option value="bh">BH</option><option value="mhu">Manhuaçu</option></select>
+            </div>
+          </div>
           <div><label class="field-label">Quantidade (pacotes)</label><input id="se-qty" type="number" min="0.001" step="any" placeholder="0" /></div>
-          <div><label class="field-label">Localidade</label>
-            <select id="se-location"><option value="mhu">Manhuaçu</option><option value="bh">BH</option></select>
+        ` : `
+          <div class="grid2">
+            <div><label class="field-label">Quantidade (pacotes)</label><input id="se-qty" type="number" min="0.001" step="any" placeholder="0" /></div>
+            <div><label class="field-label">Localidade</label>
+              <select id="se-location"><option value="mhu">Manhuaçu</option><option value="bh">BH</option></select>
+            </div>
           </div>
-        </div>
-        <div class="grid2">
-          ${type === "entrada" ? `<div><label class="field-label">Custo unitário (opcional)</label><input id="se-cost" type="number" min="0" step="any" placeholder="0,00" /></div>` : `<div></div>`}
-          <div><label class="field-label">Motivo</label>
-            <select id="se-reason">${reasons.map((r) => `<option value="${r}">${r}</option>`).join("")}</select>
+          <div class="grid2">
+            ${type === "entrada" ? `<div><label class="field-label">Custo unitário (opcional)</label><input id="se-cost" type="number" min="0" step="any" placeholder="0,00" /></div>` : `<div></div>`}
+            <div><label class="field-label">Motivo</label>
+              <select id="se-reason">${reasons.map((r) => `<option value="${r}">${r}</option>`).join("")}</select>
+            </div>
           </div>
-        </div>
+        `}
         <div><label class="field-label">Quem está registrando?</label><input id="se-user" value="${escapeHtml(lastUser)}" placeholder="seu nome" /></div>
         <div><label class="field-label">Observação (opcional)</label><input id="se-note" placeholder="ex: nota fiscal 1234" /></div>
         <div style="display:flex;gap:8px;margin-top:6px;">
@@ -2076,16 +2128,32 @@ async function openStockEntryModal() {
     $("#modal-close", backdrop).onclick = () => backdrop.remove();
     $("#modal-cancel", backdrop).onclick = () => backdrop.remove();
     $$(".se-type-pill", backdrop).forEach((btn) => { btn.onclick = () => { type = btn.dataset.type; paint(); }; });
+    if (type === "transferencia") {
+      $("#se-from", backdrop).onchange = (e) => {
+        $("#se-to", backdrop).value = e.target.value === "bh" ? "mhu" : "bh";
+      };
+    }
     $("#modal-save", backdrop).onclick = async () => {
       const product = state.products.find((p) => p.id === $("#se-product", backdrop).value);
       const quantity = Number($("#se-qty", backdrop).value) || 0;
-      const location = $("#se-location", backdrop).value;
-      const unitCost = type === "entrada" ? (Number($("#se-cost", backdrop)?.value) || 0) : 0;
-      const reason = $("#se-reason", backdrop).value;
       const loggedBy = $("#se-user", backdrop).value.trim();
       const note = $("#se-note", backdrop).value.trim();
       if (!product || quantity <= 0) return;
       if (loggedBy) localStorage.setItem("cafe_app_last_stock_user", loggedBy);
+
+      if (type === "transferencia") {
+        const fromLocation = $("#se-from", backdrop).value;
+        const toLocation = $("#se-to", backdrop).value;
+        if (fromLocation === toLocation) { alert("Escolha duas localidades diferentes."); return; }
+        const protocolId = await registerStockTransfer({ product, quantity, fromLocation, toLocation, note, loggedBy });
+        backdrop.remove();
+        if (protocolId) alert(`Transferência registrada! Protocolo #${orderNumber(protocolId)}`);
+        return;
+      }
+
+      const location = $("#se-location", backdrop).value;
+      const unitCost = type === "entrada" ? (Number($("#se-cost", backdrop)?.value) || 0) : 0;
+      const reason = $("#se-reason", backdrop).value;
       if (type === "entrada") {
         await registerStockEntry({ product, quantity, location, unitCost, reason, note, loggedBy });
       } else {
@@ -2100,8 +2168,12 @@ async function openStockEntryModal() {
 
 function renderMovimentacoes() {
   const list = filteredMovements();
-  const entradas = list.filter((m) => m.movement_type === "entrada");
-  const saidas = list.filter((m) => m.movement_type === "saida");
+  // Transferências entre localidades não contam como entrada/saída "real" nos
+  // totais e no relatório por usuário — senão inflaria os números (é o mesmo
+  // pacote só mudando de lugar, não uma compra nem um consumo de verdade).
+  const entradas = list.filter((m) => m.movement_type === "entrada" && !m.transfer_group_id);
+  const saidas = list.filter((m) => m.movement_type === "saida" && !m.transfer_group_id);
+  const transferencias = list.filter((m) => m.transfer_group_id && m.movement_type === "saida");
   const totalPacotesEntrada = entradas.reduce((s, m) => s + Number(m.quantity), 0);
   const totalPacotesSaida = saidas.reduce((s, m) => s + Number(m.quantity), 0);
 
@@ -2174,6 +2246,7 @@ function renderMovimentacoes() {
           <option value="todos" ${state.movType === "todos" ? "selected" : ""}>Entradas e saídas</option>
           <option value="entrada" ${state.movType === "entrada" ? "selected" : ""}>Só entradas</option>
           <option value="saida" ${state.movType === "saida" ? "selected" : ""}>Só saídas</option>
+          <option value="transferencia" ${state.movType === "transferencia" ? "selected" : ""}>Só transferências</option>
         </select>
       </div>
     </div>
@@ -2182,6 +2255,9 @@ function renderMovimentacoes() {
       <div class="metric"><div class="label">📥 Entradas</div><div class="value mono">${entradas.length}</div><div style="font-size:11px;color:var(--muted2);margin-top:2px;">${Number(totalPacotesEntrada.toFixed(3))} pacotes</div></div>
       <div class="metric"><div class="label">📤 Saídas</div><div class="value mono">${saidas.length}</div><div style="font-size:11px;color:var(--muted2);margin-top:2px;">${Number(totalPacotesSaida.toFixed(3))} pacotes</div></div>
     </div>
+    ${transferencias.length ? `
+    <div class="metric" style="margin-bottom:16px;"><div class="label">🔁 Transferências entre localidades</div><div class="value mono">${transferencias.length}</div><div style="font-size:11px;color:var(--muted2);margin-top:2px;">${Number(transferencias.reduce((s, m) => s + Number(m.quantity), 0).toFixed(3))} pacotes movidos</div></div>
+    ` : ""}
 
     ${stockFormula}
 
@@ -2201,13 +2277,15 @@ function renderMovimentacoes() {
           <div class="card" data-mid="${m.id}" style="padding:10px 12px;">
             <div class="row" style="align-items:flex-start;">
               <div style="min-width:0;">
-                <p style="margin:0;font-size:14px;">${m.movement_type === "entrada" ? "📥" : "📤"} ${escapeHtml(m.product_name)}</p>
+                <p style="margin:0;font-size:14px;">${m.transfer_group_id ? "🔁" : m.movement_type === "entrada" ? "📥" : "📤"} ${escapeHtml(m.product_name)}</p>
                 <p style="margin:2px 0 0;font-size:12px;color:var(--muted2);">
                   ${new Date(m.entered_at).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}
                   ${m.location ? " · " + escapeHtml(m.location) : ""}
                   ${m.logged_by ? " · " + escapeHtml(m.logged_by) : ""}
                 </p>
-                ${m.reason || m.order_key || m.note ? `<p style="margin:4px 0 0;font-size:12px;color:var(--muted2);">
+                ${m.transfer_group_id ? `<p style="margin:4px 0 0;font-size:12px;color:var(--muted2);">
+                  Transferência ${m.movement_type === "saida" ? "para" : "de"} ${escapeHtml(m.related_location || "outra localidade")} · Protocolo #${orderNumber(m.transfer_group_id)}${m.note ? " · " + escapeHtml(m.note) : ""}
+                </p>` : (m.reason || m.order_key || m.note) ? `<p style="margin:4px 0 0;font-size:12px;color:var(--muted2);">
                   ${m.reason ? escapeHtml(m.reason) : ""}${m.order_key ? ` · Pedido #${orderNumber(m.order_key)}` : ""}${m.note ? " · " + escapeHtml(m.note) : ""}
                 </p>` : ""}
               </div>
@@ -2224,7 +2302,11 @@ function renderMovimentacoes() {
   $$(".btn-del-mov", $("#main")).forEach((btn) => {
     btn.onclick = async () => {
       const card = btn.closest(".card[data-mid]");
-      if (confirm("Excluir esta movimentação do histórico? Isso remove só o registro — não altera a quantidade em estoque do produto.")) {
+      const m = state.stockEntries.find((x) => x.id === card.dataset.mid);
+      const msg = m && m.transfer_group_id
+        ? "Essa é uma transferência entre localidades — excluir remove as DUAS pontas do protocolo (origem e destino). Confirmar?"
+        : "Excluir esta movimentação do histórico? Isso remove só o registro — não altera a quantidade em estoque do produto.";
+      if (confirm(msg)) {
         await deleteStockMovement(card.dataset.mid);
       }
     };
