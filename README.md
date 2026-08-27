@@ -16,6 +16,25 @@ fazer login, nem você.
 
 ## Novidades desta versão
 
+- **Responsável e protocolo direto embaixo de cada movimentação** — antes
+  isso só aparecia se você fosse até a aba Auditoria e filtrasse
+  manualmente. Agora, um link discreto "🔎 Protocolo #... · Fulano"
+  aparece direto embaixo de cada:
+  - Movimentação de estoque (Movimentações);
+  - Movimentação de caixa (Caixa);
+  - Compra e pagamento no extrato do cliente (A Receber).
+
+  Clicar no link abre o mesmo detalhe completo da Auditoria (o quê mudou,
+  quando, por quem) sem precisar sair da tela onde você já está. A aba
+  Auditoria continua existindo, pra quando você quiser buscar/filtrar o
+  histórico inteiro de uma vez — isso aqui é só um atalho pro contexto de
+  cada registro específico.
+  - Transferências (estoque e caixa) já mostravam seu próprio protocolo
+    antes — isso não mudou, só não duplicamos o link nelas.
+  - Só não aparece o link em registros criados **antes** da auditoria
+    existir no sistema — não tem como reconstruir esse histórico
+    retroativamente.
+
 - **Modo Desktop** — o app foi pensado pra celular (tudo numa coluna só),
   o que sobrava espaço vazio dos dois lados quando aberto no notebook/PC.
   Agora tem um botão 🖥️ no cabeçalho (do lado do de tema claro/escuro) que

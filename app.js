@@ -803,7 +803,7 @@ function clientStatementRows(group) {
   receivables.forEach((r) => {
     receivablePaymentsFor(r.id).forEach((p) => {
       events.push({
-        type: "pagamento", date: p.paid_at, amount: Number(p.amount),
+        type: "pagamento", date: p.paid_at, amount: Number(p.amount), paymentId: p.id,
         paymentMethod: p.payment_method, note: p.note, receivableId: r.id, saleGroupId: r.sale_group_id,
       });
     });
@@ -2000,6 +2000,7 @@ function openClientReceivablesModal(group) {
               <br/>
               ${saldoR > 0.004 ? `<button class="btn btn-quitar-pedido" style="margin-top:4px;font-size:11px;padding:4px 8px;">Quitar este pedido (${money(saldoR)})</button>` : ""}
               <button class="icon-btn danger btn-del-receivable" style="min-width:26px;min-height:26px;font-size:12px;padding:2px;margin-top:4px;" title="Excluir esta conta a receber">🗑</button>
+              <br/>${auditTrailLink("receivables", e.receivableId)}
             </span>
             <span style="text-align:right;flex-shrink:0;">
               <b class="mono" style="color:var(--danger-text);">+${money(e.amount)}</b><br/>
@@ -2012,6 +2013,7 @@ function openClientReceivablesModal(group) {
           <span>
             💰 Pagamento${e.paymentMethod ? " via " + escapeHtml(paymentLabel(e.paymentMethod)) : ""}<br/>
             <span style="font-size:11px;color:var(--muted2);">${date}${e.note ? " · " + escapeHtml(e.note) : ""}</span>
+            <br/>${auditTrailLink("receivable_payments", e.paymentId)}
           </span>
           <span style="text-align:right;flex-shrink:0;">
             <b class="mono" style="color:var(--accent-dark);">−${money(e.amount)}</b><br/>
@@ -2047,6 +2049,7 @@ function openClientReceivablesModal(group) {
         }
       };
     });
+    wireAuditTrailLinks(backdrop);
   };
 
   backdrop.innerHTML = `
@@ -2618,6 +2621,7 @@ function renderMovimentacoes() {
                 </p>` : (m.reason || m.order_key || m.note) ? `<p style="margin:4px 0 0;font-size:12px;color:var(--muted2);">
                   ${m.reason ? escapeHtml(m.reason) : ""}${m.order_key ? ` · Pedido #${orderNumber(m.order_key)}` : ""}${m.note ? " · " + escapeHtml(m.note) : ""}
                 </p>` : ""}
+                ${!m.transfer_group_id ? auditTrailLink("stock_entries", m.id) : ""}
               </div>
               <div style="display:flex;align-items:center;gap:4px;flex-shrink:0;">
                 <span class="mono" style="font-size:14px;color:${m.movement_type === "entrada" ? "var(--accent-dark)" : "var(--danger-text)"};">${m.movement_type === "entrada" ? "+" : "−"}${Number(m.quantity)}</span>
@@ -2629,6 +2633,7 @@ function renderMovimentacoes() {
   `;
 
   $("#btn-new-entry").onclick = () => openStockEntryModal();
+  wireAuditTrailLinks($("#main"));
   $$(".btn-del-mov", $("#main")).forEach((btn) => {
     btn.onclick = async () => {
       const card = btn.closest(".card[data-mid]");
@@ -3038,6 +3043,7 @@ function renderCaixa() {
                 </p>
                 <p style="margin:4px 0 0;font-size:12px;color:var(--muted2);">${cashMovementOriginLabel(m)}${m.note ? " · " + escapeHtml(m.note) : ""}</p>
                 ${allocCount ? `<button class="btn btn-ver-conciliacao" data-tgid="${m.transfer_group_id}" style="margin-top:6px;font-size:11px;padding:4px 8px;">🔗 Ver conciliação (${allocCount} pedido${allocCount === 1 ? "" : "s"})</button>` : ""}
+                ${!m.transfer_group_id ? auditTrailLink("cash_movements", m.id) : ""}
               </div>
               <div style="display:flex;align-items:center;gap:4px;flex-shrink:0;">
                 <span class="mono" style="font-size:14px;color:${m.movement_type === "entrada" ? "var(--accent-dark)" : "var(--danger-text)"};">${m.movement_type === "entrada" ? "+" : "−"}${money(m.amount)}</span>
@@ -3081,6 +3087,7 @@ function renderCaixa() {
   $$(".btn-ver-conciliacao", $("#main")).forEach((btn) => {
     btn.onclick = () => openTransferAllocationsModal(btn.dataset.tgid);
   });
+  wireAuditTrailLinks($("#main"));
   $$(".caixa-period-pill", $("#main")).forEach((btn) => { btn.onclick = () => { state.caixaPeriod = btn.dataset.period; renderCaixa(); }; });
   $("#caixa-from") && ($("#caixa-from").onchange = (e) => { state.caixaCustomFrom = e.target.value; renderCaixa(); });
   $("#caixa-to") && ($("#caixa-to").onchange = (e) => { state.caixaCustomTo = e.target.value; renderCaixa(); });
@@ -3342,6 +3349,31 @@ const AUDIT_ACTION_ICON = { insert: "➕", update: "✎", delete: "🗑" };
 
 function auditTableLabel(t) { return AUDIT_TABLE_LABELS[t] || t; }
 
+// Acha o evento de criação de um registro específico no log de auditoria
+// — usado pra mostrar "Protocolo #... · Fulano" direto embaixo de uma
+// movimentação, sem precisar ir até a aba Auditoria. Só não aparece nada
+// se o registro foi criado antes da auditoria existir (não tem como
+// reconstruir isso retroativamente).
+function auditCreationEntry(tableName, recordId) {
+  return state.auditLog.find((a) => a.table_name === tableName && a.record_id === recordId && a.action === "insert");
+}
+// Pequeno botão clicável "Protocolo #... · Fulano" pra usar direto nas
+// telas de Movimentações, Caixa, Contas a Receber, etc.
+function auditTrailLink(tableName, recordId) {
+  const entry = auditCreationEntry(tableName, recordId);
+  if (!entry) return "";
+  return `<button class="btn-audit-link mono" data-table="${tableName}" data-rid="${recordId}" style="background:none;border:none;padding:0;margin-top:4px;font-size:11px;color:var(--muted2);cursor:pointer;text-decoration:underline dotted;">🔎 Protocolo #${escapeHtml(entry.protocol)} · ${escapeHtml(entry.changed_by_name || "—")}</button>`;
+}
+// Liga os cliques desses botões — chamar depois de renderizar a lista.
+function wireAuditTrailLinks(root) {
+  $$(".btn-audit-link", root).forEach((btn) => {
+    btn.onclick = () => {
+      const entry = auditCreationEntry(btn.dataset.table, btn.dataset.rid);
+      if (entry) openAuditDetailModal(entry);
+    };
+  });
+}
+
 function filteredAuditLog() {
   const [from, to] = periodRange(state.auditPeriod, state.auditCustomFrom, state.auditCustomTo);
   return state.auditLog.filter((a) => {
@@ -3386,6 +3418,7 @@ function openAuditDetailModal(entry) {
   const fields = auditChangedFields(entry);
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
+  backdrop.style.zIndex = "70"; // pode ser aberto de dentro de outro modal (Movimentações, Caixa, extrato do cliente...)
   backdrop.innerHTML = `
     <div class="modal">
       <div class="row" style="margin-bottom:16px;">
