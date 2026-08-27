@@ -16,6 +16,18 @@ fazer login, nem você.
 
 ## Novidades desta versão
 
+- **Custo do produto virou livre, não mais só 3 campos fixos.** Antes só
+  dava pra informar Embalagem, Torra e Adesivos. Agora, no cadastro/edição
+  de cada produto, você adiciona **quantos itens de custo quiser, com o
+  nome que quiser** — Frete, Mão de obra, Imposto, ou qualquer coisa que
+  for surgindo. Tem botões de atalho pros custos mais comuns (Embalagem,
+  Torra, Adesivos, Frete, Mão de obra, Impostos) e um "+ Outro custo" pra
+  digitar um nome novo. O custo total (que já é usado no cálculo de
+  markup/margem e no lucro das vendas) continua sendo a soma de tudo,
+  automaticamente. Os custos que você já tinha cadastrado (Embalagem/
+  Torra/Adesivos) foram migrados automaticamente pra esse novo formato —
+  nada se perde.
+
 - **Login de verdade + auditoria com protocolo.** Veja a seção "Sobre
   segurança" no final deste documento — é a mudança mais importante desta
   versão.
@@ -297,10 +309,17 @@ fazer login, nem você.
   caixa, data/hora, usuário, e a origem do lançamento (venda, recebimento,
   transferência ou manual) sem duplicar nada de `sales`/`receivables`.
 - Na tabela **products**: `cost_packaging`, `cost_roasting` e
-  `cost_stickers` (custo detalhado por componente). A coluna `cost` que já
-  existia continua lá — agora ela é sempre a **soma** dos três, pra não
-  quebrar nada que já usava o custo total (cálculo de lucro nas vendas,
-  Resumo, etc.).
+  `cost_stickers` — eram os 3 campos fixos de custo da versão anterior.
+  Ficaram como **legado** (os dados antigos continuam lá, migrados pra
+  tabela nova abaixo) — o app não usa mais essas 3 colunas diretamente.
+- Tabela nova **product_cost_items**: os itens de custo livres de cada
+  produto (nome + valor, quantos quiser). A coluna `cost` de `products`
+  continua sendo sempre a **soma** de todos os itens desse produto, pra
+  não quebrar nada que já usava o custo total (cálculo de lucro nas
+  vendas, Resumo, etc.). O script migra automaticamente os valores que já
+  existiam em `cost_packaging`/`cost_roasting`/`cost_stickers` pra essa
+  tabela nova, na primeira vez que você rodar — sem duplicar se rodar de
+  novo.
 - Tabela nova **cash_transfer_allocations**: liga o protocolo de uma
   transferência de caixa aos pedidos que ela conciliou (e por quanto cada
   um). Não duplica `receivables`/`receivable_payments` — só referencia,

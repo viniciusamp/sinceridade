@@ -82,7 +82,7 @@ let state = {
   tab: "estoque", products: [], sales: [], clients: [], sellers: [], cart: [],
   receivables: [], receivablePayments: [], recompraContacts: [], orderDeliveries: [], stockEntries: [],
   cashRegisters: [], cashMovements: [], cashTransferAllocations: [],
-  profiles: [], auditLog: [],
+  profiles: [], auditLog: [], productCostItems: [],
   auditUser: "", auditTable: "", auditAction: "todos", auditPeriod: "todos",
   auditCustomFrom: "", auditCustomTo: "",
   loading: true, loadError: null,
@@ -386,6 +386,9 @@ async function loadAll() {
   const { data: auditLog, error: e14 } = await db
     .from("audit_log").select("*").order("created_at", { ascending: false }).limit(500);
   if (e14) { console.warn("audit_log indisponível (rode o supabase-schema.sql):", e14.message); }
+  const { data: productCostItems, error: e15 } = await db
+    .from("product_cost_items").select("*").order("position", { ascending: true });
+  if (e15) { console.warn("product_cost_items indisponível (rode o supabase-schema.sql):", e15.message); }
   state.loadError = null;
   state.products = products || [];
   state.sales = sales || [];
@@ -401,6 +404,7 @@ async function loadAll() {
   state.cashTransferAllocations = cashTransferAllocations || [];
   state.profiles = profiles || [];
   state.auditLog = auditLog || [];
+  state.productCostItems = productCostItems || [];
   state.loading = false;
   render();
   updateBirthdayDot();
@@ -423,6 +427,7 @@ function subscribeRealtime() {
     .on("postgres_changes", { event: "*", schema: "public", table: "cash_transfer_allocations" }, loadAll)
     .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, loadAll)
     .on("postgres_changes", { event: "*", schema: "public", table: "audit_log" }, loadAll)
+    .on("postgres_changes", { event: "*", schema: "public", table: "product_cost_items" }, loadAll)
     .subscribe((status) => {
       const label = $("#sync-indicator");
       if (!label) return;
@@ -435,21 +440,34 @@ function subscribeRealtime() {
 }
 
 async function addProduct(data) {
-  await db.from("products").insert({
+  const { data: row } = await db.from("products").insert({
     name: data.name, unit: data.unit,
     min_stock: data.minStock, price: data.price, cost: data.cost,
-    cost_packaging: data.costPackaging, cost_roasting: data.costRoasting, cost_stickers: data.costStickers,
-  });
+  }).select().single();
+  return row;
 }
 async function updateProduct(id, data) {
   // Não altera quantidade/localidade — isso só muda pela aba Movimentações.
   await db.from("products").update({
     name: data.name, unit: data.unit,
     min_stock: data.minStock, price: data.price, cost: data.cost,
-    cost_packaging: data.costPackaging, cost_roasting: data.costRoasting, cost_stickers: data.costStickers,
   }).eq("id", id);
 }
 async function deleteProduct(id) { await db.from("products").delete().eq("id", id); }
+
+// Itens de custo livres de um produto (Embalagem, Torra, Frete, o que
+// surgir). Salvar sempre substitui a lista inteira — é mais simples e
+// seguro do que tentar comparar item por item o que mudou.
+function productCostItemsFor(productId) {
+  return state.productCostItems.filter((it) => it.product_id === productId).sort((a, b) => a.position - b.position);
+}
+async function syncProductCostItems(productId, items) {
+  await db.from("product_cost_items").delete().eq("product_id", productId);
+  const rows = items
+    .filter((it) => it.label.trim())
+    .map((it, idx) => ({ product_id: productId, label: it.label.trim(), amount: Number(it.amount) || 0, position: idx }));
+  if (rows.length) await db.from("product_cost_items").insert(rows);
+}
 
 async function logStockMovement({ productId, productName, unit, movementType, quantity, location, orderKey, reason, note, loggedBy, unitCost, transferGroupId, relatedLocation }) {
   await db.from("stock_entries").insert({
@@ -1103,8 +1121,43 @@ function openProductModal(product) {
   const isEdit = !!product;
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
-  backdrop.innerHTML = `
-    <div class="modal">
+  backdrop.innerHTML = `<div class="modal" id="pm-modal-body"></div>`;
+  document.body.appendChild(backdrop);
+  backdrop.onclick = (e) => { if (e.target === backdrop) backdrop.remove(); };
+
+  // Custos existentes do produto (ou vazio, se for um produto novo).
+  let costItems = isEdit
+    ? productCostItemsFor(product.id).map((it) => ({ label: it.label, amount: Number(it.amount) }))
+    : [];
+  const COST_SUGGESTIONS = ["Embalagem", "Torra", "Adesivos", "Frete", "Mão de obra", "Impostos"];
+
+  const totalCost = () => costItems.reduce((s, it) => s + (Number(it.amount) || 0), 0);
+
+  function updateProfit() {
+    const cost = totalCost();
+    const price = Number($("#f-price", backdrop)?.value) || 0;
+    const totalEl = $("#f-cost-total", backdrop);
+    if (totalEl) totalEl.innerHTML = `Custo total: <b class="mono">${money(cost)}</b>`;
+    const preview = $("#profit-preview", backdrop);
+    if (!preview) return;
+    if (cost > 0 && price > 0) {
+      const profit = price - cost;
+      const margin = (profit / price) * 100;
+      const markup = (price / cost - 1) * 100;
+      const goodCls = profit >= 0 ? "profit-good" : "";
+      preview.innerHTML = `
+        <div class="profit-row"><span>Lucro por ${escapeHtml($("#f-unit", backdrop).value)}</span><span class="mono ${goodCls}">${money(profit)}</span></div>
+        <div class="profit-row"><span>Margem</span><span class="mono ${goodCls}">${margin.toFixed(1)}%</span></div>
+        <div class="profit-row"><span>Markup</span><span class="mono ${goodCls}">${markup.toFixed(1)}%</span></div>
+      `;
+      preview.style.display = "flex";
+    } else { preview.style.display = "none"; }
+  }
+
+  function paint() {
+    const usedLabels = costItems.map((it) => it.label);
+    const chips = COST_SUGGESTIONS.filter((s) => !usedLabels.includes(s));
+    $("#pm-modal-body", backdrop).innerHTML = `
       <div class="row" style="margin-bottom:16px;">
         <h3 class="serif" style="margin:0;font-size:17px;">${isEdit ? "Editar produto" : "Novo produto"}</h3>
         <button class="icon-btn" id="modal-close">✕</button>
@@ -1124,13 +1177,24 @@ function openProductModal(product) {
             <input id="f-min" type="number" step="any" value="${isEdit ? product.min_stock : ""}" placeholder="0" />
           </div>
         </div>
+
         <p style="margin:0;font-size:13px;font-weight:500;color:var(--muted);">Custo de produção (por ${isEdit ? escapeHtml(product.unit) : "unidade"})</p>
-        <div class="grid2">
-          <div><label class="field-label">Embalagem (R$)</label><input id="f-cost-packaging" type="number" step="any" value="${isEdit ? Number(product.cost_packaging || 0) : ""}" placeholder="0,00" /></div>
-          <div><label class="field-label">Torra (R$)</label><input id="f-cost-roasting" type="number" step="any" value="${isEdit ? Number(product.cost_roasting || 0) : ""}" placeholder="0,00" /></div>
+        <div id="pm-cost-list" style="display:flex;flex-direction:column;gap:8px;">
+          ${costItems.length === 0 ? `<p style="margin:0;font-size:12px;color:var(--muted2);">Nenhum item de custo ainda — adicione abaixo.</p>` : costItems.map((it, idx) => `
+            <div class="cart-row" data-idx="${idx}">
+              <input class="pm-cost-label" data-idx="${idx}" value="${escapeHtml(it.label)}" placeholder="Nome do custo" style="flex:2;" />
+              <input class="pm-cost-amount" data-idx="${idx}" type="number" step="any" value="${it.amount}" placeholder="0,00" />
+              <button class="cart-remove pm-cost-remove" data-idx="${idx}">✕</button>
+            </div>
+          `).join("")}
         </div>
-        <div><label class="field-label">Adesivos (R$)</label><input id="f-cost-stickers" type="number" step="any" value="${isEdit ? Number(product.cost_stickers || 0) : ""}" placeholder="0,00" /></div>
-        <p id="f-cost-total" style="margin:0;font-size:13px;color:var(--muted);">Custo total: <b class="mono">R$ 0,00</b></p>
+        ${chips.length ? `
+          <div style="display:flex;flex-wrap:wrap;gap:6px;">
+            ${chips.map((c) => `<button class="rc-pill pm-cost-chip" data-label="${escapeHtml(c)}" style="padding:5px 10px;">+ ${escapeHtml(c)}</button>`).join("")}
+          </div>` : ""}
+        <button class="btn" id="pm-add-cost" type="button" style="width:100%;">+ Outro custo</button>
+        <p id="f-cost-total" style="margin:0;font-size:13px;color:var(--muted);">Custo total: <b class="mono">${money(totalCost())}</b></p>
+
         <div>
           <label class="field-label">Preço de venda (R$)</label>
           <input id="f-price" type="number" step="any" value="${isEdit ? product.price : ""}" placeholder="0,00" />
@@ -1142,55 +1206,52 @@ function openProductModal(product) {
           <button class="btn btn-accent" id="modal-save" style="flex:1;">Salvar</button>
         </div>
       </div>
-    </div>
-  `;
-  document.body.appendChild(backdrop);
-  backdrop.onclick = (e) => { if (e.target === backdrop) backdrop.remove(); };
-  $("#modal-close", backdrop).onclick = () => backdrop.remove();
-  $("#modal-cancel", backdrop).onclick = () => backdrop.remove();
+    `;
+    wire();
+    updateProfit();
+  }
 
-  const totalCost = () =>
-    (Number($("#f-cost-packaging", backdrop).value) || 0) +
-    (Number($("#f-cost-roasting", backdrop).value) || 0) +
-    (Number($("#f-cost-stickers", backdrop).value) || 0);
+  function wire() {
+    $("#modal-close", backdrop).onclick = () => backdrop.remove();
+    $("#modal-cancel", backdrop).onclick = () => backdrop.remove();
+    $("#f-price", backdrop).oninput = updateProfit;
+    $("#f-unit", backdrop).onchange = updateProfit;
+    $$(".pm-cost-label", backdrop).forEach((el) => {
+      el.oninput = () => { costItems[Number(el.dataset.idx)].label = el.value; };
+    });
+    $$(".pm-cost-amount", backdrop).forEach((el) => {
+      el.oninput = () => { costItems[Number(el.dataset.idx)].amount = Number(el.value) || 0; updateProfit(); };
+    });
+    $$(".pm-cost-remove", backdrop).forEach((btn) => {
+      btn.onclick = () => { costItems.splice(Number(btn.dataset.idx), 1); paint(); };
+    });
+    $$(".pm-cost-chip", backdrop).forEach((btn) => {
+      btn.onclick = () => { costItems.push({ label: btn.dataset.label, amount: 0 }); paint(); };
+    });
+    $("#pm-add-cost", backdrop).onclick = () => { costItems.push({ label: "", amount: 0 }); paint(); };
 
-  const updateProfit = () => {
-    const cost = totalCost();
-    const price = Number($("#f-price", backdrop).value) || 0;
-    $("#f-cost-total", backdrop).innerHTML = `Custo total: <b class="mono">${money(cost)}</b>`;
-    const preview = $("#profit-preview", backdrop);
-    if (cost > 0 && price > 0) {
-      const profit = price - cost;
-      const margin = (profit / price) * 100;
-      const markup = (price / cost - 1) * 100;
-      const goodCls = profit >= 0 ? "profit-good" : "";
-      preview.innerHTML = `
-        <div class="profit-row"><span>Lucro por ${escapeHtml($("#f-unit", backdrop).value)}</span><span class="mono ${goodCls}">${money(profit)}</span></div>
-        <div class="profit-row"><span>Margem</span><span class="mono ${goodCls}">${margin.toFixed(1)}%</span></div>
-        <div class="profit-row"><span>Markup</span><span class="mono ${goodCls}">${markup.toFixed(1)}%</span></div>
-      `;
-      preview.style.display = "flex";
-    } else { preview.style.display = "none"; }
-  };
-  $$("#f-cost-packaging, #f-cost-roasting, #f-cost-stickers, #f-price", backdrop).forEach((el) => { el.oninput = updateProfit; });
-  $("#f-unit", backdrop).onchange = updateProfit;
-  updateProfit();
-
-  $("#modal-save", backdrop).onclick = async () => {
-    const data = {
-      name: $("#f-name", backdrop).value.trim(),
-      unit: $("#f-unit", backdrop).value,
-      minStock: Number($("#f-min", backdrop).value) || 0,
-      price: Number($("#f-price", backdrop).value) || 0,
-      costPackaging: Number($("#f-cost-packaging", backdrop).value) || 0,
-      costRoasting: Number($("#f-cost-roasting", backdrop).value) || 0,
-      costStickers: Number($("#f-cost-stickers", backdrop).value) || 0,
+    $("#modal-save", backdrop).onclick = async () => {
+      const data = {
+        name: $("#f-name", backdrop).value.trim(),
+        unit: $("#f-unit", backdrop).value,
+        minStock: Number($("#f-min", backdrop).value) || 0,
+        price: Number($("#f-price", backdrop).value) || 0,
+        cost: totalCost(),
+      };
+      if (!data.name) return;
+      const cleanItems = costItems.filter((it) => it.label.trim());
+      if (isEdit) {
+        await updateProduct(product.id, data);
+        await syncProductCostItems(product.id, cleanItems);
+      } else {
+        const row = await addProduct(data);
+        if (row) await syncProductCostItems(row.id, cleanItems);
+      }
+      backdrop.remove();
     };
-    data.cost = data.costPackaging + data.costRoasting + data.costStickers;
-    if (!data.name) return;
-    if (isEdit) await updateProduct(product.id, data); else await addProduct(data);
-    backdrop.remove();
-  };
+  }
+
+  paint();
 }
 
 // ---- Vendas ----

@@ -14,12 +14,49 @@ create table if not exists products (
   last_modified_by text,
   created_at timestamptz not null default now()
 );
--- Custo de produção detalhado por componente (a coluna "cost" acima passa a
--- ser sempre a SOMA dos três abaixo — continua existindo pra não quebrar o
--- que já usa "cost", como o custo registrado em cada venda).
-alter table products add column if not exists cost_packaging numeric not null default 0; -- embalagem
-alter table products add column if not exists cost_roasting numeric not null default 0;  -- torra
-alter table products add column if not exists cost_stickers numeric not null default 0;  -- adesivos
+-- Custo de produção detalhado por componente. As três colunas abaixo eram
+-- os únicos "tipos" de custo possíveis (versão antiga) — a coluna "cost"
+-- continua existindo e é sempre a SOMA do custo total do produto, pra não
+-- quebrar nada que já usa "cost" (custo registrado em cada venda, cálculo
+-- de lucro no Resumo, etc.).
+alter table products add column if not exists cost_packaging numeric not null default 0; -- embalagem (legado)
+alter table products add column if not exists cost_roasting numeric not null default 0;  -- torra (legado)
+alter table products add column if not exists cost_stickers numeric not null default 0;  -- adesivos (legado)
+
+-- Itens de custo LIVRES por produto — em vez de só 3 campos fixos, cada
+-- produto pode ter quantos itens de custo quiser, com o nome que quiser
+-- (Embalagem, Torra, Frete, Mão de obra, Imposto, o que surgir). A soma de
+-- todos os itens de um produto é o que preenche "products.cost".
+create table if not exists product_cost_items (
+  id uuid primary key default gen_random_uuid(),
+  product_id uuid not null references products(id) on delete cascade,
+  label text not null,
+  amount numeric not null default 0,
+  position int not null default 0, -- ordem de exibição na tela
+  created_at timestamptz not null default now()
+);
+alter table product_cost_items enable row level security;
+
+drop policy if exists "authenticated only product_cost_items" on product_cost_items;
+create policy "authenticated only product_cost_items" on product_cost_items
+  for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+
+-- Migra os valores que já existiam nas 3 colunas fixas pra itens de custo
+-- de verdade, só na primeira vez (não duplica se você rodar de novo).
+insert into product_cost_items (product_id, label, amount, position)
+select id, 'Embalagem', cost_packaging, 0 from products
+where cost_packaging > 0
+  and not exists (select 1 from product_cost_items pci where pci.product_id = products.id and pci.label = 'Embalagem');
+
+insert into product_cost_items (product_id, label, amount, position)
+select id, 'Torra', cost_roasting, 1 from products
+where cost_roasting > 0
+  and not exists (select 1 from product_cost_items pci where pci.product_id = products.id and pci.label = 'Torra');
+
+insert into product_cost_items (product_id, label, amount, position)
+select id, 'Adesivos', cost_stickers, 2 from products
+where cost_stickers > 0
+  and not exists (select 1 from product_cost_items pci where pci.product_id = products.id and pci.label = 'Adesivos');
 
 create table if not exists sales (
   id uuid primary key default gen_random_uuid(),
@@ -423,7 +460,7 @@ begin
   foreach t in array array[
     'products','sales','stock_entries','clients','sellers',
     'receivables','receivable_payments','recompra_contacts','order_deliveries',
-    'cash_registers','cash_movements','cash_transfer_allocations'
+    'cash_registers','cash_movements','cash_transfer_allocations','product_cost_items'
   ]
   loop
     execute format('drop trigger if exists trg_audit_%1$s on %1$s;', t);
@@ -441,5 +478,8 @@ begin
   exception when others then null; end;
   begin
     alter publication supabase_realtime add table audit_log;
+  exception when others then null; end;
+  begin
+    alter publication supabase_realtime add table product_cost_items;
   exception when others then null; end;
 end $$;
