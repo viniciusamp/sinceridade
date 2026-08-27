@@ -39,6 +39,39 @@
   nav button{flex:0 0 auto; padding:10px 12px; background:none; border:none; border-bottom:2px solid transparent; font-size:12px; font-weight:500; color:var(--muted2); cursor:pointer; white-space:nowrap;}
   nav button.active{color:var(--ink); border-color:var(--accent);}
   main{padding:20px;}
+
+  /* ── Modo Desktop ──────────────────────────────────────── */
+  /* Reorganiza o mesmo HTML (header/nav/main) num layout de barra lateral
+     pra telas grandes, sem precisar mudar nenhuma tela individualmente. */
+  html[data-view="desktop"] body{ background:var(--surface); }
+  html[data-view="desktop"] #app{
+    max-width:1180px; margin:0 auto; box-shadow:0 0 60px rgba(0,0,0,.10);
+    display:grid; grid-template-columns:220px 1fr;
+    grid-template-areas:"header header" "nav main";
+    align-items:start;
+  }
+  html[data-view="desktop"] header{ grid-area:header; }
+  html[data-view="desktop"] nav{
+    grid-area:nav; flex-direction:column; align-items:stretch;
+    overflow-x:visible; overflow-y:auto; position:sticky; top:0;
+    max-height:100vh; border-right:1px solid var(--border); border-bottom:none;
+    padding:12px 0;
+  }
+  html[data-view="desktop"] nav button{
+    text-align:left; padding:10px 20px; font-size:13px;
+    border-bottom:none; border-left:3px solid transparent;
+  }
+  html[data-view="desktop"] nav button.active{ background:var(--bg); border-left-color:var(--accent); }
+  html[data-view="desktop"] main{
+    grid-area:main; padding:32px 40px; max-width:760px; margin:0 auto; width:100%;
+  }
+  html[data-view="desktop"] .grid2{ grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); }
+  html[data-view="desktop"] .modal-backdrop{ align-items:center; }
+  @media (max-width:860px){
+    /* Tela grande mas não gigante (notebook pequeno): ainda usa a barra
+       lateral, mas sem forçar largura mínima que não caiba. */
+    html[data-view="desktop"] #app{ grid-template-columns:180px 1fr; }
+  }
   .btn{border-radius:10px; border:1px solid var(--border-strong); padding:9px 14px; font-size:13px; font-weight:500; cursor:pointer; background:var(--card); color:var(--ink);}
   .btn:hover{background:var(--surface);}
   .btn-dark{background:var(--brand); color:#fff; border:none;}
@@ -247,6 +280,7 @@
       <p><span id="sync-indicator"><span class="sync-dot off"></span>conectando...</span></p>
     </div>
     <div style="display:flex;align-items:center;gap:4px;">
+      <button id="btn-view" title="Alternar versão desktop/celular" style="background:none;border:none;color:#C9B896;cursor:pointer;font-size:18px;padding:4px;opacity:.85;">🖥️</button>
       <button id="btn-theme" title="Alternar tema claro/escuro" style="background:none;border:none;color:#C9B896;cursor:pointer;font-size:18px;padding:4px;opacity:.85;">🌙</button>
       <button id="btn-birthday" title="Aniversariantes de hoje" style="position:relative;background:none;border:none;color:#C9B896;cursor:pointer;font-size:18px;padding:4px;opacity:.85;">
         🎂<span id="birthday-dot"></span>

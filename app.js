@@ -900,6 +900,28 @@ document.getElementById("btn-theme")?.addEventListener("click", () => {
   applyTheme(next);
 });
 
+// ---- Versão desktop/celular ----
+// O app foi pensado pra celular (coluna única). Em telas grandes, o modo
+// desktop reorganiza o MESMO conteúdo com o menu virando barra lateral —
+// tudo via CSS (veja index.html), sem precisar mudar cada tela.
+function applyView(view) {
+  document.documentElement.setAttribute("data-view", view);
+  const btn = document.getElementById("btn-view");
+  if (btn) btn.textContent = view === "desktop" ? "📱" : "🖥️";
+}
+(function initView() {
+  const saved = localStorage.getItem("cafe_app_view");
+  // Reconhece automaticamente: tela larga (típico de notebook/PC) começa
+  // em modo desktop; tela estreita (celular) começa em modo padrão. Se a
+  // pessoa já escolheu manualmente antes, isso prevalece.
+  applyView(saved || (window.innerWidth >= 900 ? "desktop" : "mobile"));
+})();
+document.getElementById("btn-view")?.addEventListener("click", () => {
+  const next = document.documentElement.getAttribute("data-view") === "desktop" ? "mobile" : "desktop";
+  localStorage.setItem("cafe_app_view", next);
+  applyView(next);
+});
+
 document.getElementById("btn-birthday")?.addEventListener("click", openBirthdayPanel);
 
 // ---- Vendedores ----

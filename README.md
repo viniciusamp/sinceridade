@@ -16,6 +16,21 @@ fazer login, nem você.
 
 ## Novidades desta versão
 
+- **Modo Desktop** — o app foi pensado pra celular (tudo numa coluna só),
+  o que sobrava espaço vazio dos dois lados quando aberto no notebook/PC.
+  Agora tem um botão 🖥️ no cabeçalho (do lado do de tema claro/escuro) que
+  reorganiza a mesma tela num layout mais adequado pra telas grandes: o
+  menu vira uma barra lateral fixa, o conteúdo ganha mais respiro, e os
+  blocos de métricas/filtros passam a usar mais colunas quando cabe.
+  - **É automático também**: ao abrir o app numa tela larga (típico de
+    notebook), ele já entra direto no modo desktop sozinho. Em celular,
+    continua abrindo do jeito de sempre. A escolha manual (botão) sempre
+    tem prioridade sobre essa detecção automática, e fica salva no
+    navegador.
+  - Nenhuma tela foi reescrita — é a mesma estrutura de sempre, só
+    reorganizada via CSS. Então tudo que já funcionava continua
+    funcionando igual, só com aproveitamento melhor do espaço.
+
 - **Custo do produto virou livre, não mais só 3 campos fixos.** Antes só
   dava pra informar Embalagem, Torra e Adesivos. Agora, no cadastro/edição
   de cada produto, você adiciona **quantos itens de custo quiser, com o
