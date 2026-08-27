@@ -49,7 +49,7 @@ let configOk = window.SUPABASE_URL && window.SUPABASE_ANON_KEY &&
 let state = {
   tab: "estoque", products: [], sales: [], clients: [], sellers: [], cart: [],
   receivables: [], receivablePayments: [], recompraContacts: [], orderDeliveries: [], stockEntries: [],
-  cashRegisters: [], cashMovements: [],
+  cashRegisters: [], cashMovements: [], cashTransferAllocations: [],
   loading: true, loadError: null,
   resumoMonth: todayISOMonthPrefix(),
   recompraFilter: { window: "7", clientId: "", productName: "", status: "" },
@@ -342,6 +342,9 @@ async function loadAll() {
   const { data: cashMovements, error: e11 } = await db
     .from("cash_movements").select("*").order("occurred_at", { ascending: false });
   if (e11) { console.warn("cash_movements indisponível (rode o supabase-schema.sql):", e11.message); }
+  const { data: cashTransferAllocations, error: e12 } = await db
+    .from("cash_transfer_allocations").select("*").order("created_at", { ascending: false });
+  if (e12) { console.warn("cash_transfer_allocations indisponível (rode o supabase-schema.sql):", e12.message); }
   state.loadError = null;
   state.products = products || [];
   state.sales = sales || [];
@@ -354,6 +357,7 @@ async function loadAll() {
   state.stockEntries = stockEntries || [];
   state.cashRegisters = cashRegisters || [];
   state.cashMovements = cashMovements || [];
+  state.cashTransferAllocations = cashTransferAllocations || [];
   state.loading = false;
   render();
   updateBirthdayDot();
@@ -373,6 +377,7 @@ function subscribeRealtime() {
     .on("postgres_changes", { event: "*", schema: "public", table: "stock_entries" }, loadAll)
     .on("postgres_changes", { event: "*", schema: "public", table: "cash_registers" }, loadAll)
     .on("postgres_changes", { event: "*", schema: "public", table: "cash_movements" }, loadAll)
+    .on("postgres_changes", { event: "*", schema: "public", table: "cash_transfer_allocations" }, loadAll)
     .subscribe((status) => {
       const label = $("#sync-indicator");
       if (!label) return;
@@ -449,7 +454,7 @@ async function logCashMovement({ cashRegisterId, movementType, amount, descripti
 }
 
 async function registerCashTransfer({ fromRegisterId, toRegisterId, amount, note, loggedBy, occurredAt }) {
-  if (!fromRegisterId || !toRegisterId || fromRegisterId === toRegisterId || !(Number(amount) > 0)) return;
+  if (!fromRegisterId || !toRegisterId || fromRegisterId === toRegisterId || !(Number(amount) > 0)) return null;
   const from = state.cashRegisters.find((c) => c.id === fromRegisterId);
   const to = state.cashRegisters.find((c) => c.id === toRegisterId);
   const transferGroupId = crypto.randomUUID();
@@ -465,10 +470,19 @@ async function registerCashTransfer({ fromRegisterId, toRegisterId, amount, note
     originType: "transferencia", transferGroupId, relatedCashRegisterId: fromRegisterId,
     loggedBy, note, occurredAt,
   });
+  return transferGroupId;
 }
 
 async function deleteCashMovement(movement) {
   if (movement.origin_type === "transferencia" && movement.transfer_group_id) {
+    // Se essa transferência tinha conciliação com pedidos, desfaz os
+    // pagamentos aplicados antes de apagar — senão os pedidos ficariam
+    // marcados como pagos/parciais sem o dinheiro ter chegado de verdade.
+    const allocations = transferAllocationsFor(movement.transfer_group_id);
+    for (const alloc of allocations) {
+      if (alloc.receivable_payment_id) await reverseReceivablePayment(alloc.receivable_payment_id);
+    }
+    await db.from("cash_transfer_allocations").delete().eq("transfer_group_id", movement.transfer_group_id);
     // Apaga as duas pernas juntas, senão o saldo consolidado ficaria errado.
     await db.from("cash_movements").delete().eq("transfer_group_id", movement.transfer_group_id);
   } else {
@@ -483,6 +497,52 @@ function cashRegisterBalance(registerId) {
 }
 function consolidatedCashBalance() {
   return state.cashRegisters.reduce((s, r) => s + cashRegisterBalance(r.id), 0);
+}
+
+// ---- Conciliação de recebimentos de BH ----
+// Pedidos de BH vendidos "à prazo" que ainda têm saldo em aberto — é a lista
+// que aparece na hora de registrar uma transferência, pra marcar quais
+// pedidos aquele dinheiro está quitando.
+function openBhOrdersForReconciliation() {
+  return computeOrders()
+    .filter((o) => o.location === "BH" && o.paymentMethod === "prazo" && o.receivable)
+    .filter((o) => Number(o.receivable.amount) - Number(o.receivable.paid_amount || 0) > 0.004)
+    .sort((a, b) => (a.soldAt < b.soldAt ? -1 : 1)); // mais antigos primeiro
+}
+
+// Aplica os valores escolhidos numa transferência aos pedidos selecionados:
+// registra o pagamento na conta a receber de cada um (reaproveita a mesma
+// lógica de sempre) e guarda o vínculo "essa transferência quitou esse
+// pedido, nesse valor" pra manter histórico da conciliação.
+async function applyTransferReconciliation(transferGroupId, allocations, note) {
+  for (const alloc of allocations) {
+    if (!(Number(alloc.amount) > 0) || !alloc.receivable) continue;
+    const paymentRow = await registerReceivablePayment(alloc.receivable, alloc.amount, note, null);
+    await db.from("cash_transfer_allocations").insert({
+      transfer_group_id: transferGroupId,
+      receivable_id: alloc.receivable.id,
+      receivable_payment_id: paymentRow ? paymentRow.id : null,
+      sale_group_id: alloc.orderKey,
+      client_name: alloc.clientName,
+      amount: alloc.amount,
+    });
+  }
+}
+
+function transferAllocationsFor(transferGroupId) {
+  return state.cashTransferAllocations.filter((a) => a.transfer_group_id === transferGroupId);
+}
+
+// "Exibir o total vendido em BH, total recebido e total ainda a receber."
+function bhReconciliationSummary() {
+  const bhOrders = computeOrders().filter((o) => o.location === "BH");
+  const totalVendido = bhOrders.reduce((s, o) => s + Number(o.total), 0);
+  const totalRecebido = bhOrders.reduce((s, o) => {
+    if (o.paymentMethod !== "prazo") return s + Number(o.total); // à vista já entrou na hora
+    return s + Number(o.receivable ? o.receivable.paid_amount || 0 : 0);
+  }, 0);
+  const totalAReceber = Number((totalVendido - totalRecebido).toFixed(2));
+  return { totalVendido, totalRecebido, totalAReceber };
 }
 
 async function registerStockEntry({ product, quantity, location, unitCost, reason, note, loggedBy }) {
@@ -607,11 +667,29 @@ async function createReceivable({ saleGroupId, clientId, clientName, amount }) {
 
 async function registerReceivablePayment(receivable, amount, note, paymentMethod) {
   const add = Math.max(0, Number(amount) || 0);
-  if (!add) return;
+  if (!add) return null;
   const newPaid = Math.min(Number(receivable.amount), Number(receivable.paid_amount || 0) + add);
   const status = newPaid >= Number(receivable.amount) ? "pago" : newPaid > 0 ? "parcial" : "aberto";
-  await db.from("receivable_payments").insert({ receivable_id: receivable.id, amount: add, note: note || null, payment_method: paymentMethod || null });
+  const { data: paymentRow } = await db.from("receivable_payments")
+    .insert({ receivable_id: receivable.id, amount: add, note: note || null, payment_method: paymentMethod || null })
+    .select().single();
   await db.from("receivables").update({ paid_amount: Number(newPaid.toFixed(2)), status }).eq("id", receivable.id);
+  return paymentRow;
+}
+
+// Desfaz um pagamento específico (usado quando uma transferência de caixa
+// conciliada é excluída) — remove o registro e devolve a conta a receber
+// pro estado de antes desse pagamento.
+async function reverseReceivablePayment(paymentId) {
+  const payment = state.receivablePayments.find((p) => p.id === paymentId);
+  if (!payment) return;
+  const receivable = state.receivables.find((r) => r.id === payment.receivable_id);
+  await db.from("receivable_payments").delete().eq("id", paymentId);
+  if (receivable) {
+    const newPaid = Math.max(0, Number((Number(receivable.paid_amount || 0) - Number(payment.amount)).toFixed(2)));
+    const status = newPaid <= 0.004 ? "aberto" : newPaid >= Number(receivable.amount) ? "pago" : "parcial";
+    await db.from("receivables").update({ paid_amount: newPaid, status }).eq("id", receivable.id);
+  }
 }
 
 // Quita um valor do total devido do cliente, sem precisar escolher um
@@ -2001,7 +2079,7 @@ function computeOrders() {
     if (!groups[key]) {
       groups[key] = {
         orderKey: key, clientId: s.client_id, clientName: s.client_name,
-        sellerName: s.seller_name, paymentMethod: s.payment_method,
+        sellerName: s.seller_name, paymentMethod: s.payment_method, location: s.location,
         soldAt: s.sold_at, total: 0, items: [],
       };
     }
@@ -2527,15 +2605,92 @@ function openCashMovementModal() {
   const lastOperator = localStorage.getItem("cafe_app_last_operator") || "";
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
-  backdrop.innerHTML = `<div class="modal" id="cm-modal-body"></div>`;
+  backdrop.innerHTML = `<div class="modal" id="cm-modal-body" style="max-width:460px;"></div>`;
   document.body.appendChild(backdrop);
   backdrop.onclick = (e) => { if (e.target === backdrop) backdrop.remove(); };
 
   let type = "entrada"; // entrada | saida | transferencia
+  let selectedAlloc = {}; // orderKey -> valor alocado, só usado na transferência
 
   const registerOptions = (excludeId) => state.cashRegisters
     .filter((c) => c.id !== excludeId)
     .map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join("");
+
+  const bhOpenOrders = () => openBhOrdersForReconciliation();
+
+  function selectedTotal() {
+    return Object.values(selectedAlloc).reduce((s, v) => s + Number(v || 0), 0);
+  }
+
+  function updateBhSummary() {
+    const summaryEl = $("#cm-bh-summary", backdrop);
+    if (!summaryEl) return;
+    const total = Number(selectedTotal().toFixed(2));
+    const valorTotal = Number($("#cm-amount", backdrop)?.value) || 0;
+    const diff = Number((valorTotal - total).toFixed(2));
+    let html;
+    if (Object.keys(selectedAlloc).length === 0) {
+      html = `<span style="color:var(--muted2);">Nenhum pedido selecionado — a transferência fica só como movimento de caixa, sem conciliar nada.</span>`;
+    } else if (Math.abs(diff) < 0.005) {
+      html = `<span style="color:var(--accent-dark);">✅ Total selecionado (${money(total)}) bate com o valor da transferência.</span>`;
+    } else if (diff > 0) {
+      html = `<span style="color:var(--warn-text);">⚠️ Selecionado ${money(total)} de ${money(valorTotal)} — faltam ${money(diff)} pra bater.</span>`;
+    } else {
+      html = `<span style="color:var(--danger-text);">⚠️ Selecionado ${money(total)}, que é ${money(Math.abs(diff))} A MAIS que o valor da transferência (${money(valorTotal)}).</span>`;
+    }
+    summaryEl.innerHTML = html;
+  }
+
+  function paintBhList() {
+    const listEl = $("#cm-bh-list", backdrop);
+    if (!listEl) return;
+    const orders = bhOpenOrders();
+    listEl.innerHTML = orders.length === 0
+      ? `<p style="font-size:12px;color:var(--muted2);">Nenhum pedido de BH em aberto no momento.</p>`
+      : orders.map((o) => {
+          const orig = Number(o.receivable.amount);
+          const recebido = Number(o.receivable.paid_amount || 0);
+          const saldo = Number((orig - recebido).toFixed(2));
+          const checked = Object.prototype.hasOwnProperty.call(selectedAlloc, o.orderKey);
+          const date = new Date(o.soldAt).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
+          return `
+            <label class="card" style="display:flex;align-items:flex-start;gap:8px;padding:8px 10px;cursor:pointer;">
+              <input type="checkbox" class="cm-bh-check" data-orderkey="${o.orderKey}" ${checked ? "checked" : ""} style="margin-top:3px;" />
+              <div style="flex:1;min-width:0;">
+                <p style="margin:0;font-size:13px;">Pedido #${orderNumber(o.orderKey)} · ${escapeHtml(o.clientName || "Cliente à vista")}</p>
+                <p style="margin:2px 0 0;font-size:11px;color:var(--muted2);">${date} · Original ${money(orig)} · Recebido ${money(recebido)} · Saldo ${money(saldo)}</p>
+                ${checked ? `<input type="number" class="cm-bh-amount" data-orderkey="${o.orderKey}" min="0.01" max="${saldo}" step="any" value="${Number(selectedAlloc[o.orderKey]).toFixed(2)}" style="margin-top:6px;" />` : ""}
+              </div>
+            </label>`;
+        }).join("");
+
+    $$(".cm-bh-check", listEl).forEach((chk) => {
+      chk.onchange = () => {
+        const orderKey = chk.dataset.orderkey;
+        const order = orders.find((o) => o.orderKey === orderKey);
+        if (chk.checked) {
+          const saldo = Number((Number(order.receivable.amount) - Number(order.receivable.paid_amount || 0)).toFixed(2));
+          const valorTotal = Number($("#cm-amount", backdrop)?.value) || 0;
+          const remaining = Math.max(0, Number((valorTotal - selectedTotal()).toFixed(2)));
+          selectedAlloc[orderKey] = Number((remaining > 0 ? Math.min(saldo, remaining) : saldo).toFixed(2));
+        } else {
+          delete selectedAlloc[orderKey];
+        }
+        paintBhList();
+        updateBhSummary();
+      };
+    });
+    $$(".cm-bh-amount", listEl).forEach((inp) => {
+      inp.oninput = () => {
+        const orderKey = inp.dataset.orderkey;
+        const max = Number(inp.max) || 0;
+        let v = Number(inp.value) || 0;
+        if (v > max) v = max;
+        selectedAlloc[orderKey] = v;
+        updateBhSummary();
+      };
+    });
+  }
 
   function paint() {
     $("#cm-modal-body", backdrop).innerHTML = `
@@ -2559,23 +2714,33 @@ function openCashMovementModal() {
           <div><label class="field-label">Descrição / histórico</label><input id="cm-desc" placeholder="Ex.: Pagamento de fornecedor" /></div>
         `}
         <div class="grid2">
-          <div><label class="field-label">Valor (R$)</label><input id="cm-amount" type="number" min="0.01" step="any" placeholder="0,00" /></div>
-          <div><label class="field-label">Data e hora</label><input id="cm-datetime" type="datetime-local" value="${nowForDatetimeLocal()}" /></div>
+          <div><label class="field-label">${type === "transferencia" ? "Valor total recebido (R$)" : "Valor (R$)"}</label><input id="cm-amount" type="number" min="0.01" step="any" placeholder="0,00" /></div>
+          <div><label class="field-label">Data ${type === "transferencia" ? "da transferência" : "e hora"}</label><input id="cm-datetime" type="datetime-local" value="${nowForDatetimeLocal()}" /></div>
         </div>
-        <div><label class="field-label">Operador</label><input id="cm-operator" value="${escapeHtml(lastOperator)}" placeholder="seu nome" /></div>
+        <div><label class="field-label">${type === "transferencia" ? "Origem / Responsável" : "Operador"}</label><input id="cm-operator" value="${escapeHtml(lastOperator)}" placeholder="seu nome" /></div>
         <div><label class="field-label">Observação (opcional)</label><input id="cm-note" placeholder="" /></div>
+        ${type === "transferencia" ? `
+          <div>
+            <p style="margin:0 0 6px;font-size:13px;font-weight:500;color:var(--muted);">Conciliar com pedidos de BH em aberto</p>
+            <p style="margin:0 0 8px;font-size:11px;color:var(--muted2);">Marque os pedidos que esse recebimento está quitando. A data da transferência é independente da data dos pedidos — dá pra quitar pedidos de vários dias diferentes numa única transferência.</p>
+            <div id="cm-bh-list" style="max-height:280px;overflow-y:auto;display:flex;flex-direction:column;gap:6px;"></div>
+            <p id="cm-bh-summary" style="margin:10px 0 0;font-size:12px;"></p>
+          </div>
+        ` : ""}
         <div style="display:flex;gap:8px;margin-top:6px;">
           <button class="btn" id="modal-cancel" style="flex:1;">Cancelar</button>
           <button class="btn btn-accent" id="cm-save" style="flex:1;">Registrar</button>
         </div>
       </div>`;
     wire();
+    if (type === "transferencia") { paintBhList(); updateBhSummary(); }
   }
 
   function wire() {
     $("#modal-close", backdrop).onclick = () => backdrop.remove();
     $("#modal-cancel", backdrop).onclick = () => backdrop.remove();
     $$(".cm-type-pill", backdrop).forEach((btn) => { btn.onclick = () => { type = btn.dataset.type; paint(); }; });
+    $("#cm-amount", backdrop).oninput = updateBhSummary;
     $("#cm-save", backdrop).onclick = async () => {
       const amount = Number($("#cm-amount", backdrop).value) || 0;
       const occurredAt = $("#cm-datetime", backdrop).value ? new Date($("#cm-datetime", backdrop).value).toISOString() : new Date().toISOString();
@@ -2588,7 +2753,29 @@ function openCashMovementModal() {
         const fromId = $("#cm-from", backdrop).value;
         const toId = $("#cm-to", backdrop).value;
         if (!fromId || !toId || fromId === toId) { alert("Escolha dois caixas diferentes."); return; }
-        await registerCashTransfer({ fromRegisterId: fromId, toRegisterId: toId, amount, note, loggedBy: operator || null, occurredAt });
+        const transferGroupId = await registerCashTransfer({ fromRegisterId: fromId, toRegisterId: toId, amount, note, loggedBy: operator || null, occurredAt });
+        const orders = bhOpenOrders();
+        const allocations = Object.entries(selectedAlloc)
+          .filter(([, v]) => Number(v) > 0)
+          .map(([orderKey, v]) => {
+            const order = orders.find((o) => o.orderKey === orderKey);
+            return order ? { orderKey, amount: Number(v), receivable: order.receivable, clientName: order.clientName } : null;
+          })
+          .filter(Boolean);
+        if (transferGroupId && allocations.length) {
+          await applyTransferReconciliation(transferGroupId, allocations, note);
+        }
+        if (transferGroupId) {
+          const totalAlocado = allocations.reduce((s, a) => s + a.amount, 0);
+          const diff = Number((amount - totalAlocado).toFixed(2));
+          let extra = "";
+          if (allocations.length && Math.abs(diff) > 0.005) {
+            extra = diff > 0
+              ? `\n\nAtenção: sobrou ${money(diff)} da transferência sem vincular a nenhum pedido.`
+              : `\n\nAtenção: você conciliou ${money(Math.abs(diff))} A MAIS do que o valor da transferência.`;
+          }
+          alert(`Transferência registrada! Protocolo #${orderNumber(transferGroupId)}${allocations.length ? `\n${allocations.length} pedido(s) conciliado(s).` : ""}${extra}`);
+        }
       } else {
         const registerId = $("#cm-register", backdrop).value;
         const description = $("#cm-desc", backdrop).value.trim();
@@ -2619,10 +2806,40 @@ function cashMovementOriginLabel(m) {
   return "Lançamento manual";
 }
 
+function openTransferAllocationsModal(transferGroupId) {
+  const allocations = transferAllocationsFor(transferGroupId).sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.style.zIndex = "60";
+  backdrop.innerHTML = `
+    <div class="modal">
+      <div class="row" style="margin-bottom:16px;">
+        <h3 class="serif" style="margin:0;font-size:17px;">Conciliação · Protocolo #${orderNumber(transferGroupId)}</h3>
+        <button class="icon-btn" id="modal-close">✕</button>
+      </div>
+      ${allocations.length === 0 ? `<p style="font-size:13px;color:var(--muted2);">Nenhum pedido vinculado.</p>` : `
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          ${allocations.map((a) => `
+            <div class="rc-detail">
+              <span>Pedido #${orderNumber(a.sale_group_id)} · ${escapeHtml(a.client_name || "Cliente à vista")}</span>
+              <b class="mono">${money(a.amount)}</b>
+            </div>
+          `).join("")}
+          <div class="rc-detail" style="border-top:1px solid var(--border);padding-top:6px;margin-top:2px;">
+            <span>Total conciliado</span><b class="mono">${money(allocations.reduce((s, a) => s + Number(a.amount), 0))}</b>
+          </div>
+        </div>`}
+    </div>`;
+  document.body.appendChild(backdrop);
+  backdrop.onclick = (e) => { if (e.target === backdrop) backdrop.remove(); };
+  $("#modal-close", backdrop).onclick = () => backdrop.remove();
+}
+
 function renderCaixa() {
   const list = filteredCashMovements();
   const entradasPeriodo = list.filter((m) => m.movement_type === "entrada").reduce((s, m) => s + Number(m.amount), 0);
   const saidasPeriodo = list.filter((m) => m.movement_type === "saida").reduce((s, m) => s + Number(m.amount), 0);
+  const bhSummary = bhReconciliationSummary();
 
   const typeLabel = { todos: "Todos", entrada: "Entrada", saida: "Saída", transferencia: "Transferência" };
 
@@ -2643,6 +2860,15 @@ function renderCaixa() {
           </div>
         </div>`).join("")}
       <button class="card" id="btn-new-register" style="flex-shrink:0;min-width:100px;background:none;border-style:dashed;color:var(--muted);cursor:pointer;">+ Novo caixa</button>
+    </div>
+
+    <div class="card" style="margin-bottom:20px;">
+      <p style="margin:0 0 10px;font-size:13px;font-weight:500;color:var(--muted);">🔗 Conciliação de BH</p>
+      <div class="grid2" style="margin-bottom:8px;">
+        <div class="metric"><div class="label">Total vendido em BH</div><div class="value mono">${money(bhSummary.totalVendido)}</div></div>
+        <div class="metric"><div class="label">Total recebido</div><div class="value mono" style="color:var(--accent-dark);">${money(bhSummary.totalRecebido)}</div></div>
+      </div>
+      <div class="metric"><div class="label">Ainda a receber</div><div class="value mono" style="color:${bhSummary.totalAReceber > 0.004 ? "var(--danger-text)" : "var(--accent-dark)"};">${money(bhSummary.totalAReceber)}</div></div>
     </div>
 
     <div class="grid2" style="margin-bottom:20px;">
@@ -2689,7 +2915,9 @@ function renderCaixa() {
     <p style="font-size:13px;font-weight:500;color:var(--muted);margin:0 0 8px;">Livro-caixa</p>
     ${list.length === 0 ? `<div class="empty">Nenhuma movimentação nessa condição.</div>` : `
       <div style="display:flex;flex-direction:column;gap:8px;">
-        ${list.map((m) => `
+        ${list.map((m) => {
+          const allocCount = m.transfer_group_id ? transferAllocationsFor(m.transfer_group_id).length : 0;
+          return `
           <div class="card" data-cmid="${m.id}" style="padding:10px 12px;">
             <div class="row" style="align-items:flex-start;">
               <div style="min-width:0;">
@@ -2700,13 +2928,15 @@ function renderCaixa() {
                   ${m.logged_by ? " · " + escapeHtml(m.logged_by) : ""}
                 </p>
                 <p style="margin:4px 0 0;font-size:12px;color:var(--muted2);">${cashMovementOriginLabel(m)}${m.note ? " · " + escapeHtml(m.note) : ""}</p>
+                ${allocCount ? `<button class="btn btn-ver-conciliacao" data-tgid="${m.transfer_group_id}" style="margin-top:6px;font-size:11px;padding:4px 8px;">🔗 Ver conciliação (${allocCount} pedido${allocCount === 1 ? "" : "s"})</button>` : ""}
               </div>
               <div style="display:flex;align-items:center;gap:4px;flex-shrink:0;">
                 <span class="mono" style="font-size:14px;color:${m.movement_type === "entrada" ? "var(--accent-dark)" : "var(--danger-text)"};">${m.movement_type === "entrada" ? "+" : "−"}${money(m.amount)}</span>
                 <button class="icon-btn danger btn-del-cm" style="min-width:28px;min-height:28px;font-size:14px;padding:2px;" title="Excluir">🗑</button>
               </div>
             </div>
-          </div>`).join("")}
+          </div>`;
+        }).join("")}
       </div>`}
   `;
 
@@ -2730,11 +2960,17 @@ function renderCaixa() {
       const card = btn.closest(".card[data-cmid]");
       const movement = state.cashMovements.find((m) => m.id === card.dataset.cmid);
       if (!movement) return;
+      const allocCount = movement.transfer_group_id ? transferAllocationsFor(movement.transfer_group_id).length : 0;
       const msg = movement.origin_type === "transferencia"
-        ? "Essa é uma transferência entre caixas — excluir remove as DUAS pernas dela (origem e destino). Confirmar?"
+        ? allocCount
+          ? `Essa transferência conciliou ${allocCount} pedido${allocCount === 1 ? "" : "s"} de BH. Excluir remove as DUAS pernas dela E desfaz os pagamentos aplicados a esses pedidos (eles voltam a ficar em aberto/parciais). Confirmar?`
+          : "Essa é uma transferência entre caixas — excluir remove as DUAS pernas dela (origem e destino). Confirmar?"
         : "Excluir esta movimentação do caixa? Essa ação não pode ser desfeita.";
       if (confirm(msg)) await deleteCashMovement(movement);
     };
+  });
+  $$(".btn-ver-conciliacao", $("#main")).forEach((btn) => {
+    btn.onclick = () => openTransferAllocationsModal(btn.dataset.tgid);
   });
   $$(".caixa-period-pill", $("#main")).forEach((btn) => { btn.onclick = () => { state.caixaPeriod = btn.dataset.period; renderCaixa(); }; });
   $("#caixa-from") && ($("#caixa-from").onchange = (e) => { state.caixaCustomFrom = e.target.value; renderCaixa(); });

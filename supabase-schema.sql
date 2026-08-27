@@ -159,6 +159,21 @@ create table if not exists cash_movements (
   created_at timestamptz not null default now()
 );
 
+-- Conciliação: liga uma transferência de caixa (pelo transfer_group_id) aos
+-- pedidos que ela quitou, e por quanto cada um. Uma transferência pode
+-- quitar vários pedidos, e um pedido pode ser quitado por várias
+-- transferências diferentes (recebimento parcial ao longo do tempo).
+create table if not exists cash_transfer_allocations (
+  id uuid primary key default gen_random_uuid(),
+  transfer_group_id uuid not null,
+  receivable_id uuid references receivables(id) on delete set null,
+  receivable_payment_id uuid references receivable_payments(id) on delete set null,
+  sale_group_id uuid,
+  client_name text,
+  amount numeric not null,
+  created_at timestamptz not null default now()
+);
+
 
 -- aqui só guardamos se o pedido já foi entregue/retirado ou não).
 -- order_key = sale_group_id da venda (ou o próprio id da venda, quando ela
@@ -188,6 +203,7 @@ alter table recompra_contacts enable row level security;
 alter table order_deliveries enable row level security;
 alter table cash_registers enable row level security;
 alter table cash_movements enable row level security;
+alter table cash_transfer_allocations enable row level security;
 
 -- Como é um app privado de uso familiar (sem login), liberamos acesso
 -- completo para quem tiver a chave "anon" do projeto (que fica só no
@@ -236,6 +252,10 @@ drop policy if exists "allow all cash_movements" on cash_movements;
 create policy "allow all cash_movements" on cash_movements
   for all using (true) with check (true);
 
+drop policy if exists "allow all cash_transfer_allocations" on cash_transfer_allocations;
+create policy "allow all cash_transfer_allocations" on cash_transfer_allocations
+  for all using (true) with check (true);
+
 -- Ativa atualização em tempo real (pra sincronizar entre os dois aparelhos)
 -- Usa bloco protegido porque, se a tabela já estiver na publicação
 -- (por ex. rodando este script mais de uma vez), o ALTER daria erro.
@@ -273,5 +293,8 @@ begin
   exception when others then null; end;
   begin
     alter publication supabase_realtime add table cash_movements;
+  exception when others then null; end;
+  begin
+    alter publication supabase_realtime add table cash_transfer_allocations;
   exception when others then null; end;
 end $$;

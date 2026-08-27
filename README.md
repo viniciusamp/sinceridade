@@ -6,6 +6,36 @@ Leva uns 10 minutos, sem precisar programar.
 
 ## Novidades desta versão
 
+- **Conciliação de recebimentos de BH direto na Transferência de Caixa.**
+  Ao registrar uma **Transferência** na aba Caixa, além dos campos de
+  sempre (origem, destino, valor, data, observação), agora tem:
+  - **Origem / Responsável** — quem trouxe/reportou esse dinheiro.
+  - Uma lista com todos os **pedidos de BH ainda em aberto** (vendidos à
+    prazo), cada um mostrando **valor original, quanto já foi recebido e o
+    saldo restante**. Você marca quais pedidos aquela transferência está
+    quitando — pode ser **um só, vários, ou nenhum**, e pode ser
+    **recebimento parcial** de um pedido (não precisa quitar tudo de uma
+    vez).
+  - O app soma o que você selecionou e compara com o **valor total da
+    transferência**, avisando se bate certinho, se falta valor pra alocar,
+    ou se você selecionou pedidos a mais do que o valor recebido.
+  - Cada pedido conciliado tem seu status atualizado automaticamente:
+    **Pendente**, **Parcial** ou **Pago** — é a mesma lógica que já existia
+    em Contas a Receber, só que agora dá pra fazer pra vários pedidos de
+    uma vez, numa única transferência.
+  - A **data da transferência é independente da data dos pedidos** — dá
+    pra quitar pedidos de dias/semanas diferentes numa transferência só.
+  - **Histórico da conciliação**: toda transferência que quitou pedidos
+    ganha um botão "🔗 Ver conciliação" no livro-caixa, mostrando quais
+    pedidos e quanto foi aplicado em cada um. Se você excluir uma
+    transferência conciliada, os pagamentos que ela tinha feito nos pedidos
+    são **desfeitos automaticamente** (eles voltam a ficar em
+    aberto/parcial), pra não sobrar pedido marcado como pago sem o
+    dinheiro ter chegado de verdade.
+  - Novo painel **"🔗 Conciliação de BH"** no topo da aba Caixa: total
+    vendido em BH, total recebido e total ainda a receber, sempre
+    atualizados.
+
 - **Contas a Receber ganhou um extrato de verdade.** Ao clicar no cliente,
   agora aparece:
   - **Total devido**, **saldo em aberto**, e um botão único **"Quitar
@@ -258,6 +288,10 @@ Leva uns 10 minutos, sem precisar programar.
   existia continua lá — agora ela é sempre a **soma** dos três, pra não
   quebrar nada que já usava o custo total (cálculo de lucro nas vendas,
   Resumo, etc.).
+- Tabela nova **cash_transfer_allocations**: liga o protocolo de uma
+  transferência de caixa aos pedidos que ela conciliou (e por quanto cada
+  um). Não duplica `receivables`/`receivable_payments` — só referencia,
+  usando a mesma estrutura de contas a receber de sempre.
 
 > Se você já usava uma versão antiga do app, rode o `supabase-schema.sql`
 > novamente — ele foi atualizado e cria as tabelas/colunas que faltavam. É
