@@ -1180,22 +1180,50 @@ function openProductModal(product) {
 
   const totalCost = () => costItems.reduce((s, it) => s + (Number(it.amount) || 0), 0);
 
-  function updateProfit() {
+  // Preço e markup são as duas pontas editáveis da calculadora — guardados
+  // aqui fora (não só no DOM) porque paint() reconstrói o HTML inteiro
+  // sempre que um item de custo é adicionado/removido.
+  let priceValue = isEdit ? String(product.price ?? "") : "";
+  let markupValue = isEdit && totalCost() > 0 && Number(product.price) > 0
+    ? (((Number(product.price) / totalCost()) - 1) * 100).toFixed(1)
+    : "";
+
+  // "source" é o campo que a pessoa acabou de editar: "markup" e "cost"
+  // recalculam o Preço mantendo o markup atual; qualquer outro caso (editou
+  // o Preço, trocou a unidade) recalcula só o Markup exibido — nunca os dois
+  // ao mesmo tempo, então não tem risco de loop de recálculo.
+  function updateProfit(source) {
     const cost = totalCost();
-    const price = Number($("#f-price", backdrop)?.value) || 0;
+    const priceEl = $("#f-price", backdrop);
+    const markupEl = $("#f-markup", backdrop);
+    const markupPct = markupValue === "" ? null : (Number(markupValue) || 0);
+
+    if ((source === "markup" || source === "cost") && markupPct !== null && cost > 0) {
+      priceValue = String(Number((cost * (1 + markupPct / 100)).toFixed(2)));
+      if (priceEl) priceEl.value = priceValue;
+    }
+
+    if (source !== "markup") {
+      const price = Number(priceValue) || 0;
+      if (cost > 0 && price > 0) {
+        markupValue = (((price / cost) - 1) * 100).toFixed(1);
+        if (markupEl) markupEl.value = markupValue;
+      }
+    }
+    if (markupEl) markupEl.disabled = cost <= 0;
+
     const totalEl = $("#f-cost-total", backdrop);
     if (totalEl) totalEl.innerHTML = `Custo total: <b class="mono">${money(cost)}</b>`;
     const preview = $("#profit-preview", backdrop);
     if (!preview) return;
+    const price = Number(priceValue) || 0;
     if (cost > 0 && price > 0) {
       const profit = price - cost;
       const margin = (profit / price) * 100;
-      const markup = (price / cost - 1) * 100;
       const goodCls = profit >= 0 ? "profit-good" : "";
       preview.innerHTML = `
-        <div class="profit-row"><span>Lucro por ${escapeHtml($("#f-unit", backdrop).value)}</span><span class="mono ${goodCls}">${money(profit)}</span></div>
+        <div class="profit-row"><span>Lucro por ${escapeHtml($("#f-unit", backdrop)?.value || "")}</span><span class="mono ${goodCls}">${money(profit)}</span></div>
         <div class="profit-row"><span>Margem</span><span class="mono ${goodCls}">${margin.toFixed(1)}%</span></div>
-        <div class="profit-row"><span>Markup</span><span class="mono ${goodCls}">${markup.toFixed(1)}%</span></div>
       `;
       preview.style.display = "flex";
     } else { preview.style.display = "none"; }
@@ -1242,9 +1270,15 @@ function openProductModal(product) {
         <button class="btn" id="pm-add-cost" type="button" style="width:100%;">+ Outro custo</button>
         <p id="f-cost-total" style="margin:0;font-size:13px;color:var(--muted);">Custo total: <b class="mono">${money(totalCost())}</b></p>
 
-        <div>
-          <label class="field-label">Preço de venda (R$)</label>
-          <input id="f-price" type="number" step="any" value="${isEdit ? product.price : ""}" placeholder="0,00" />
+        <div class="grid2">
+          <div>
+            <label class="field-label">Preço de venda (R$)</label>
+            <input id="f-price" type="number" step="any" value="${priceValue}" placeholder="0,00" />
+          </div>
+          <div>
+            <label class="field-label">Markup (%)</label>
+            <input id="f-markup" type="number" step="any" value="${markupValue}" placeholder="0" ${totalCost() <= 0 ? "disabled" : ""} />
+          </div>
         </div>
         <div id="profit-preview" class="profit-preview" style="display:none;"></div>
         ${!isEdit ? `<p style="margin:0;font-size:12px;color:var(--muted2);">Produto novo começa com estoque zerado. Depois de salvar, dê entrada na quantidade inicial pela aba <b>Movimentações</b>.</p>` : ""}
@@ -1255,19 +1289,20 @@ function openProductModal(product) {
       </div>
     `;
     wire();
-    updateProfit();
+    updateProfit("cost");
   }
 
   function wire() {
     $("#modal-close", backdrop).onclick = () => backdrop.remove();
     $("#modal-cancel", backdrop).onclick = () => backdrop.remove();
-    $("#f-price", backdrop).oninput = updateProfit;
-    $("#f-unit", backdrop).onchange = updateProfit;
+    $("#f-price", backdrop).oninput = () => { priceValue = $("#f-price", backdrop).value; updateProfit("price"); };
+    $("#f-markup", backdrop).oninput = () => { markupValue = $("#f-markup", backdrop).value; updateProfit("markup"); };
+    $("#f-unit", backdrop).onchange = () => updateProfit();
     $$(".pm-cost-label", backdrop).forEach((el) => {
       el.oninput = () => { costItems[Number(el.dataset.idx)].label = el.value; };
     });
     $$(".pm-cost-amount", backdrop).forEach((el) => {
-      el.oninput = () => { costItems[Number(el.dataset.idx)].amount = Number(el.value) || 0; updateProfit(); };
+      el.oninput = () => { costItems[Number(el.dataset.idx)].amount = Number(el.value) || 0; updateProfit("cost"); };
     });
     $$(".pm-cost-remove", backdrop).forEach((btn) => {
       btn.onclick = () => { costItems.splice(Number(btn.dataset.idx), 1); paint(); };
