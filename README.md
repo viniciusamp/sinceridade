@@ -16,6 +16,48 @@ fazer login, nem você.
 
 ## Novidades desta versão
 
+- **Verificação: vendas à vista e pagamentos de Contas a Receber já
+  entram no Caixa** — conferi o código de ponta a ponta e confirmei que
+  está funcionando. **Um detalhe importante pra você saber**: isso só
+  acontece quando você **escolhe um caixa** na hora (tanto na venda quanto
+  na quitação, o campo tem a opção "Não lançar no caixa" — se ficar
+  assim, nada é registrado). Se algum lançamento estiver "sumindo" do
+  Caixa, é provavelmente por causa disso.
+  - De brinde: corrigi uma inconsistência — a venda à vista estava
+    registrando o **vendedor** como responsável no caixa, em vez de quem
+    de fato está logado fazendo a venda. Agora usa sempre quem está
+    logado, como no resto do sistema.
+- **Caixa agrupado por dia.** O livro-caixa agora mostra "Hoje", "Ontem"
+  e as datas seguintes como cabeçalhos, cada um com o total de entradas e
+  saídas daquele dia — em vez de uma lista corrida só.
+- **Clique no pedido pra ver detalhes (aba Pedidos).** Antes só dava pra
+  agir pelos botões do card. Agora, clicar em qualquer lugar do card abre
+  os detalhes completos: itens um a um com preço, vendedor, localidade,
+  status de pagamento e entrega — e um novo campo pra **trocar a forma de
+  pagamento** do pedido.
+  - Trocar entre Pix/Dinheiro/Cartão é livre.
+  - Trocar de/para "À prazo" também funciona (cria ou remove a conta a
+    receber automaticamente), mas só é permitido se **nada tiver sido
+    pago ainda** naquele pedido — se já tiver pagamento parcial
+    registrado, o app bloqueia a troca pra não perder esse histórico
+    (nesse caso, resolva primeiro pela aba A Receber).
+
+- **Login por nome de usuário, não mais por e-mail.** Em vez de digitar
+  `vinicius.amorim964@gmail.com`, agora dá pra digitar só `vinicius` na
+  tela de login. O e-mail continua existindo por trás (o Supabase exige
+  um), mas ninguém mais precisa saber ou digitar ele no dia a dia.
+  - **Ação recomendada pras contas que você já tinha criado antes desta
+    atualização:** a migração dá um nome de usuário automático baseado no
+    e-mail (ex.: `vinicius.amorim964`, a parte antes do `@`) — funciona,
+    mas não é tão curto quanto poderia. Se quiser um nome mais limpo (tipo
+    só `vinicius`), rode isso no SQL Editor do Supabase, uma vez pra cada
+    pessoa (ache o ID da pessoa em **Authentication → Users**):
+    ```sql
+    update profiles set username = 'vinicius' where id = 'COLE-O-UUID-AQUI';
+    ```
+  - Pra contas novas, já dá pra definir o nome de usuário direto na
+    criação — veja o passo a passo atualizado na seção "Sobre segurança".
+
 - **Responsável e protocolo direto embaixo de cada movimentação** — antes
   isso só aparecia se você fosse até a aba Auditoria e filtrasse
   manualmente. Agora, um link discreto "🔎 Protocolo #... · Fulano"
@@ -362,10 +404,16 @@ fazer login, nem você.
   pode ler/escrever" para "só usuário autenticado". Sem login, a chave
   `anon` sozinha não abre mais nenhum dado.
 - Tabela nova **profiles**: nome de exibição de cada usuário (criada
-  automaticamente quando você cadastra alguém no Supabase Auth).
+  automaticamente quando você cadastra alguém no Supabase Auth). Ganhou a
+  coluna **username** nesta versão.
 - Tabela nova **audit_log**: registro de auditoria com protocolo — grava
   sozinha, via trigger do banco, toda vez que qualquer tabela de negócio é
   criada/editada/apagada. Não é possível escrever nela pelo app.
+- Tabela nova **username_lookup**: vínculo nome de usuário → e-mail, pra
+  tela de login funcionar sem pedir e-mail. Ninguém consegue ler essa
+  tabela diretamente (nem autenticado) — só uma função específica do
+  banco (`get_email_for_username`) consegue consultar, uma pessoa por
+  vez, e é só essa função que o app usa.
 
 > Se você já usava uma versão antiga do app, rode o `supabase-schema.sql`
 > novamente — ele foi atualizado e cria as tabelas/colunas que faltavam. É
@@ -426,22 +474,30 @@ projeto pode criar contas, e é assim que deve ser).
 2. No menu da esquerda, clique em **Authentication** → aba **Users**.
 3. Clique em **Add user** → **Create new user**.
 4. Preencha:
-   - **Email**: o e-mail da pessoa (é isso que ela vai digitar pra
-     entrar no app).
+   - **Email**: um e-mail qualquer (só o Supabase exige um e-mail por
+     trás — a pessoa **não vai precisar digitar ele** pra entrar,
+     só na criação da conta).
    - **Password**: uma senha (pode trocar depois).
    - Marque **Auto Confirm User** (importante — sem isso a conta fica
      pendente de confirmação por e-mail, e como o projeto não tem envio
      de e-mail configurado, ela nunca seria confirmada).
 5. Ainda nessa tela, em **User Metadata**, cole:
    ```json
-   {"display_name": "Nome da pessoa"}
+   {"display_name": "Vinicius", "username": "vinicius"}
    ```
-   Isso define o nome que aparece no app e na aba Auditoria. Se pular
-   esse passo, o app usa a parte antes do `@` do e-mail como nome.
+   - `display_name` é o nome que aparece no app e na aba Auditoria
+     (ex.: "Registrado por Vinicius").
+   - `username` é o que a pessoa vai **digitar na tela de login**, no
+     lugar do e-mail (ex.: `vinicius.amorim964@gmail.com` vira só
+     `vinicius`). Use letras minúsculas, sem espaço.
+   - Se você pular esse passo, o app usa a parte antes do `@` do e-mail
+     como nome e como usuário — mas informar os dois é mais confiável.
 6. Clique em **Create user**. Pronto — a pessoa já consegue entrar no
-   site com esse e-mail e senha.
+   site digitando o **usuário** (não o e-mail) e a senha.
 
-Repita esse processo pra cada pessoa que for usar o sistema.
+Repita esse processo pra cada pessoa que for usar o sistema. O nome de
+usuário precisa ser único no sistema — se duas pessoas tiverem o mesmo,
+dê um nome diferente pra segunda (ex.: `vinicius2`).
 
 ### Auditoria — quem fez o quê
 

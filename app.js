@@ -32,12 +32,26 @@ function initLoginForm() {
   const errEl = document.getElementById("login-error");
   const tryLogin = async () => {
     errEl.style.display = "none";
-    const email = userEl.value.trim();
+    const username = userEl.value.trim().toLowerCase();
     const password = passEl.value;
-    if (!email || !password) return;
+    if (!username || !password) return;
     const originalText = btnEl.textContent;
     btnEl.disabled = true;
     btnEl.textContent = "Entrando...";
+
+    // O nome de usuário não é o e-mail — primeiro descobre o e-mail
+    // correspondente (via função do banco, sem expor a lista de usuários),
+    // só depois autentica de verdade com o Supabase Auth.
+    const { data: email, error: lookupError } = await db.rpc("get_email_for_username", { p_username: username });
+    if (lookupError || !email) {
+      btnEl.disabled = false;
+      btnEl.textContent = originalText;
+      errEl.style.display = "block";
+      passEl.value = "";
+      passEl.focus();
+      return;
+    }
+
     const { data, error } = await db.auth.signInWithPassword({ email, password });
     btnEl.disabled = false;
     btnEl.textContent = originalText;
@@ -1364,7 +1378,7 @@ function openNewOrderModal(opts = {}) {
           await logCashMovement({
             cashRegisterId: caixaId, movementType: "entrada", amount: finalTotal,
             description: `Venda${clientName !== "Cliente à vista" ? " — " + clientName : ""}`,
-            originType: "venda", originId: saleGroupId, loggedBy: sellerName || null,
+            originType: "venda", originId: saleGroupId, loggedBy: currentUser.displayName,
           });
         }
       }
@@ -2247,7 +2261,124 @@ async function deleteOrder(order) {
   if (delivery) await db.from("order_deliveries").delete().eq("id", delivery.id);
 }
 
+// Troca a forma de pagamento de um pedido já registrado. Entre as formas
+// à vista (Pix/Dinheiro/Cartão) é uma troca simples. Envolvendo "À prazo"
+// tem efeito colateral na conta a receber:
+// - vira "à prazo" agora: cria a conta a receber do valor total do pedido;
+// - deixa de ser "à prazo": remove a conta a receber (só é chamado depois
+//   de confirmar que ainda não foi paga nada, pra não perder histórico).
+async function changeOrderPaymentMethod(order, newMethod) {
+  for (const item of order.items) {
+    await db.from("sales").update({ payment_method: newMethod }).eq("id", item.id);
+  }
+  const wasPrazo = order.paymentMethod === "prazo";
+  const willBePrazo = newMethod === "prazo";
+  if (!wasPrazo && willBePrazo && !order.receivable) {
+    await createReceivable({ saleGroupId: order.orderKey, clientId: order.clientId, clientName: order.clientName, amount: order.total });
+  } else if (wasPrazo && !willBePrazo && order.receivable) {
+    await db.from("receivables").delete().eq("id", order.receivable.id);
+  }
+}
+
 function orderNumber(orderKey) { return String(orderKey).replace(/-/g, "").slice(0, 6).toUpperCase(); }
+
+function openOrderDetailModal(order) {
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+
+  const renderBody = () => {
+    const o = computeOrders().find((x) => x.orderKey === order.orderKey);
+    if (!o) { backdrop.remove(); renderPedidos(); return; }
+    const payOk = o.paymentStatus === "pago";
+    const delOk = o.statusDelivery === "entregue";
+    const hasPaidSomething = o.receivable && Number(o.receivable.paid_amount) > 0.004;
+
+    $("#od-body", backdrop).innerHTML = `
+      <div class="row" style="margin-bottom:16px;">
+        <h3 class="serif" style="margin:0;font-size:17px;">Pedido #${orderNumber(o.orderKey)}</h3>
+        <button class="icon-btn" id="modal-close">✕</button>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:14px;">
+        <div>
+          <p style="margin:0;font-size:15px;font-weight:500;">${escapeHtml(o.clientName || "Cliente à vista")}</p>
+          <p style="margin:2px 0 0;font-size:12px;color:var(--muted2);">
+            ${new Date(o.soldAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+            ${o.sellerName ? " · Vendedor: " + escapeHtml(o.sellerName) : ""}
+            ${o.location ? " · " + escapeHtml(o.location) : ""}
+          </p>
+        </div>
+
+        <div>
+          <p style="margin:0 0 6px;font-size:13px;font-weight:500;color:var(--muted);">Itens</p>
+          <div style="display:flex;flex-direction:column;gap:4px;">
+            ${o.items.map((it) => `
+              <div class="rc-detail">
+                <span>${Number(it.quantity)} × ${escapeHtml(it.product_name)} <span style="color:var(--muted2);">(${money(it.unit_price)})</span></span>
+                <b class="mono">${money(it.total)}</b>
+              </div>`).join("")}
+          </div>
+          <div class="rc-detail" style="border-top:1px solid var(--border);padding-top:6px;margin-top:4px;">
+            <span>Total</span><b class="mono">${money(o.total)}</b>
+          </div>
+        </div>
+
+        <div style="font-size:13px;display:flex;flex-direction:column;gap:3px;">
+          <span>Pagamento: ${payOk ? "🟢 Pago" : "🔴 Pendente"}${o.paymentMethod === "prazo" && o.receivable && o.receivable.status === "parcial" ? ` <span style="color:var(--muted2);">(pago ${money(o.receivable.paid_amount)} de ${money(o.receivable.amount)})</span>` : ""}</span>
+          <span>Entrega: ${delOk ? "🟢 Entregue" : "🔴 Pendente"}${o.deliveredBy ? ` <span style="color:var(--muted2);">por ${escapeHtml(o.deliveredBy)}</span>` : ""}</span>
+        </div>
+
+        <div>
+          <label class="field-label">Forma de pagamento</label>
+          <div style="display:flex;gap:6px;">
+            <select id="od-payment-method" style="flex:1;">
+              ${PAYMENT_METHODS.map((m) => `<option value="${m.value}" ${m.value === o.paymentMethod ? "selected" : ""}>${m.label}</option>`).join("")}
+            </select>
+            <button class="btn" id="od-payment-save" style="flex-shrink:0;">Salvar</button>
+          </div>
+          ${hasPaidSomething ? `<p style="margin:6px 0 0;font-size:11px;color:var(--warn-text);">Esse pedido já tem pagamento parcial registrado — só é possível trocar entre Pix/Dinheiro/Cartão, não dá pra tirar de "À prazo" sem antes desfazer os pagamentos já feitos.</p>` : ""}
+        </div>
+
+        <div style="display:flex;gap:8px;">
+          ${delOk
+            ? `<button class="btn btn-undo-delivery" style="flex:1;font-size:13px;">Desfazer entrega</button>`
+            : `<button class="btn btn-accent btn-deliver" style="flex:1;font-size:13px;">Confirmar entrega</button>`}
+          ${!payOk && o.receivable ? `<button class="btn btn-pay-order" style="flex:1;font-size:13px;">Quitar pagamento</button>` : ""}
+        </div>
+        <button class="icon-btn danger btn-del-order" style="width:100%;" title="Excluir pedido">🗑 Excluir pedido</button>
+      </div>
+    `;
+
+    $("#modal-close", backdrop).onclick = () => backdrop.remove();
+    $("#od-payment-save", backdrop).onclick = async () => {
+      const newMethod = $("#od-payment-method", backdrop).value;
+      if (newMethod === o.paymentMethod) return;
+      if (hasPaidSomething && newMethod !== "prazo") {
+        alert("Esse pedido já tem pagamento parcial registrado nele — não dá pra trocar de \"À prazo\" sem antes desfazer esses pagamentos (na aba A Receber).");
+        return;
+      }
+      await changeOrderPaymentMethod(o, newMethod);
+      renderBody();
+    };
+    const deliverBtn = $(".btn-deliver", backdrop);
+    if (deliverBtn) deliverBtn.onclick = () => openMarkDeliveredModal(o, renderBody);
+    const undoBtn = $(".btn-undo-delivery", backdrop);
+    if (undoBtn) undoBtn.onclick = async () => { await markOrderPending(o); renderBody(); };
+    const payBtn = $(".btn-pay-order", backdrop);
+    if (payBtn) payBtn.onclick = () => openRegisterPaymentModal(o.receivable, renderBody);
+    $(".btn-del-order", backdrop).onclick = async () => {
+      if (confirm(`Excluir o pedido #${orderNumber(o.orderKey)}? Isso remove a venda, devolve o estoque e apaga a conta a receber ligada a ele (se houver).`)) {
+        await deleteOrder(o);
+        backdrop.remove();
+        renderPedidos();
+      }
+    };
+  };
+
+  backdrop.innerHTML = `<div class="modal" id="od-body" style="max-width:460px;"></div>`;
+  document.body.appendChild(backdrop);
+  backdrop.onclick = (e) => { if (e.target === backdrop) { backdrop.remove(); renderPedidos(); } };
+  renderBody();
+}
 
 function renderPedidos() {
   const all = computeOrders();
@@ -2309,13 +2440,16 @@ function renderPedidos() {
   $$(".del-pill", $("#main")).forEach((btn) => { btn.onclick = () => { state.pedidosDeliveryFilter = btn.dataset.filter; renderPedidos(); }; });
   $$(".card[data-key]", $("#main")).forEach((card) => {
     const order = list.find((x) => String(x.orderKey) === card.dataset.key);
+    card.style.cursor = "pointer";
+    card.onclick = () => openOrderDetailModal(order);
     const deliverBtn = $(".btn-deliver", card);
-    if (deliverBtn) deliverBtn.onclick = () => openMarkDeliveredModal(order);
+    if (deliverBtn) deliverBtn.onclick = (e) => { e.stopPropagation(); openMarkDeliveredModal(order); };
     const undoBtn = $(".btn-undo-delivery", card);
-    if (undoBtn) undoBtn.onclick = async () => { await markOrderPending(order); };
+    if (undoBtn) undoBtn.onclick = async (e) => { e.stopPropagation(); await markOrderPending(order); };
     const payBtn = $(".btn-pay-order", card);
-    if (payBtn) payBtn.onclick = () => openRegisterPaymentModal(order.receivable, () => renderPedidos());
-    $(".btn-del-order", card).onclick = async () => {
+    if (payBtn) payBtn.onclick = (e) => { e.stopPropagation(); openRegisterPaymentModal(order.receivable, () => renderPedidos()); };
+    $(".btn-del-order", card).onclick = async (e) => {
+      e.stopPropagation();
       if (confirm(`Excluir o pedido #${orderNumber(order.orderKey)}? Isso remove a venda, devolve o estoque e apaga a conta a receber ligada a ele (se houver).`)) {
         await deleteOrder(order);
       }
@@ -2323,7 +2457,7 @@ function renderPedidos() {
   });
 }
 
-function openMarkDeliveredModal(order) {
+function openMarkDeliveredModal(order, onDone) {
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
   backdrop.innerHTML = `
@@ -2350,6 +2484,7 @@ function openMarkDeliveredModal(order) {
     const note = $("#od-note", backdrop).value.trim();
     await markOrderDelivered(order, { deliveredBy: currentUser.displayName, note });
     backdrop.remove();
+    onDone && onDone();
   };
 }
 
@@ -2949,6 +3084,21 @@ function openTransferAllocationsModal(transferGroupId) {
   $("#modal-close", backdrop).onclick = () => backdrop.remove();
 }
 
+function groupMovementsByDay(list) {
+  const groups = {};
+  list.forEach((m) => {
+    const day = m.occurred_at.slice(0, 10);
+    (groups[day] = groups[day] || []).push(m);
+  });
+  return Object.entries(groups).sort((a, b) => (a[0] < b[0] ? 1 : -1)); // dia mais recente primeiro
+}
+function dayLabel(day) {
+  if (day === todayISO()) return "Hoje";
+  const y = new Date(); y.setDate(y.getDate() - 1);
+  if (day === y.toISOString().slice(0, 10)) return "Ontem";
+  return new Date(day + "T00:00:00").toLocaleDateString("pt-BR", { weekday: "short", day: "2-digit", month: "2-digit", year: "numeric" });
+}
+
 function renderCaixa() {
   const list = filteredCashMovements();
   const entradasPeriodo = list.filter((m) => m.movement_type === "entrada").reduce((s, m) => s + Number(m.amount), 0);
@@ -3027,32 +3177,42 @@ function renderCaixa() {
     </div>
 
     <p style="font-size:13px;font-weight:500;color:var(--muted);margin:0 0 8px;">Livro-caixa</p>
-    ${list.length === 0 ? `<div class="empty">Nenhuma movimentação nessa condição.</div>` : `
-      <div style="display:flex;flex-direction:column;gap:8px;">
-        ${list.map((m) => {
-          const allocCount = m.transfer_group_id ? transferAllocationsFor(m.transfer_group_id).length : 0;
-          return `
-          <div class="card" data-cmid="${m.id}" style="padding:10px 12px;">
-            <div class="row" style="align-items:flex-start;">
-              <div style="min-width:0;">
-                <p style="margin:0;font-size:14px;">${escapeHtml(m.description)}</p>
-                <p style="margin:2px 0 0;font-size:12px;color:var(--muted2);">
-                  ${new Date(m.occurred_at).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}
-                  · ${escapeHtml(cashRegisterName(m.cash_register_id))}
-                  ${m.logged_by ? " · " + escapeHtml(m.logged_by) : ""}
-                </p>
-                <p style="margin:4px 0 0;font-size:12px;color:var(--muted2);">${cashMovementOriginLabel(m)}${m.note ? " · " + escapeHtml(m.note) : ""}</p>
-                ${allocCount ? `<button class="btn btn-ver-conciliacao" data-tgid="${m.transfer_group_id}" style="margin-top:6px;font-size:11px;padding:4px 8px;">🔗 Ver conciliação (${allocCount} pedido${allocCount === 1 ? "" : "s"})</button>` : ""}
-                ${!m.transfer_group_id ? auditTrailLink("cash_movements", m.id) : ""}
+    ${list.length === 0 ? `<div class="empty">Nenhuma movimentação nessa condição.</div>` : groupMovementsByDay(list).map(([day, dayList]) => {
+      const dayEntradas = dayList.filter((m) => m.movement_type === "entrada").reduce((s, m) => s + Number(m.amount), 0);
+      const daySaidas = dayList.filter((m) => m.movement_type === "saida").reduce((s, m) => s + Number(m.amount), 0);
+      return `
+      <div style="margin-bottom:18px;">
+        <div class="row" style="margin-bottom:8px;">
+          <span style="font-size:11px;font-weight:600;color:var(--muted2);text-transform:uppercase;letter-spacing:.03em;">${dayLabel(day)}</span>
+          <span style="font-size:12px;color:var(--muted);" class="mono">+${money(dayEntradas)} · −${money(daySaidas)}</span>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          ${dayList.map((m) => {
+            const allocCount = m.transfer_group_id ? transferAllocationsFor(m.transfer_group_id).length : 0;
+            return `
+            <div class="card" data-cmid="${m.id}" style="padding:10px 12px;">
+              <div class="row" style="align-items:flex-start;">
+                <div style="min-width:0;">
+                  <p style="margin:0;font-size:14px;">${escapeHtml(m.description)}</p>
+                  <p style="margin:2px 0 0;font-size:12px;color:var(--muted2);">
+                    ${new Date(m.occurred_at).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}
+                    · ${escapeHtml(cashRegisterName(m.cash_register_id))}
+                    ${m.logged_by ? " · " + escapeHtml(m.logged_by) : ""}
+                  </p>
+                  <p style="margin:4px 0 0;font-size:12px;color:var(--muted2);">${cashMovementOriginLabel(m)}${m.note ? " · " + escapeHtml(m.note) : ""}</p>
+                  ${allocCount ? `<button class="btn btn-ver-conciliacao" data-tgid="${m.transfer_group_id}" style="margin-top:6px;font-size:11px;padding:4px 8px;">🔗 Ver conciliação (${allocCount} pedido${allocCount === 1 ? "" : "s"})</button>` : ""}
+                  ${!m.transfer_group_id ? auditTrailLink("cash_movements", m.id) : ""}
+                </div>
+                <div style="display:flex;align-items:center;gap:4px;flex-shrink:0;">
+                  <span class="mono" style="font-size:14px;color:${m.movement_type === "entrada" ? "var(--accent-dark)" : "var(--danger-text)"};">${m.movement_type === "entrada" ? "+" : "−"}${money(m.amount)}</span>
+                  <button class="icon-btn danger btn-del-cm" style="min-width:28px;min-height:28px;font-size:14px;padding:2px;" title="Excluir">🗑</button>
+                </div>
               </div>
-              <div style="display:flex;align-items:center;gap:4px;flex-shrink:0;">
-                <span class="mono" style="font-size:14px;color:${m.movement_type === "entrada" ? "var(--accent-dark)" : "var(--danger-text)"};">${m.movement_type === "entrada" ? "+" : "−"}${money(m.amount)}</span>
-                <button class="icon-btn danger btn-del-cm" style="min-width:28px;min-height:28px;font-size:14px;padding:2px;" title="Excluir">🗑</button>
-              </div>
-            </div>
-          </div>`;
-        }).join("")}
-      </div>`}
+            </div>`;
+          }).join("")}
+        </div>
+      </div>`;
+    }).join("")}
   `;
 
   $("#btn-new-register").onclick = () => openCashRegisterModal(null);
