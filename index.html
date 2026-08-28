@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Café Sinceridade Gestão</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>☕</text></svg>" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@500;600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -151,6 +152,8 @@
   #login-error{display:none; color:var(--danger); font-size:13px; text-align:center; background:var(--danger-bg); border-radius:8px; padding:8px 12px;}
   #login-btn{width:100%; padding:12px; border-radius:10px; background:var(--brand); color:#fff; border:none; font-size:15px; font-weight:500; cursor:pointer; font-family:inherit;}
   #login-btn:hover{background:var(--brand-dark);}
+  #btn-forgot-password{width:100%; background:none; border:none; color:var(--muted); font-size:12px; text-decoration:underline; cursor:pointer; padding:4px; font-family:inherit;}
+  #btn-forgot-password:hover{color:var(--ink);}
   #login-footer{font-size:11px; color:var(--muted2); text-align:center;}
 
   /* ── Wheel Picker ─────────────────────────────────────── */
@@ -261,15 +264,16 @@
     <p id="login-sub">Entre com suas credenciais para acessar o sistema.</p>
     <div id="login-fields">
       <div>
-        <label class="field-label">E-mail</label>
-        <input id="login-user" type="email" placeholder="seu-email@exemplo.com" autocomplete="username" />
+        <label class="field-label">Usuário</label>
+        <input id="login-user" type="text" placeholder="ex.: vinicius" autocomplete="username" autocapitalize="none" />
       </div>
       <div>
         <label class="field-label">Senha</label>
         <input id="login-pass" type="password" placeholder="••••••••" autocomplete="current-password" />
       </div>
-      <p id="login-error">E-mail ou senha incorretos. Tente novamente.</p>
+      <p id="login-error">Usuário ou senha incorretos. Tente novamente.</p>
       <button id="login-btn">Entrar →</button>
+      <button id="btn-forgot-password" type="button">Esqueci minha senha</button>
     </div>
     <p id="login-footer">Café Sinceridade — Sistema interno de controle</p>
   </div>

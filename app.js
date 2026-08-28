@@ -1,5 +1,8 @@
 // ---- Auth (Supabase Auth de verdade — cada pessoa com o próprio login) ----
 const PIX_KEY = "09156713606";
+// Número de WhatsApp de quem pode resetar senha de usuário (com DDI+DDD,
+// só números, sem espaço/traço/parêntese — ex.: 55 + DDD + número).
+const SUPPORT_WHATSAPP = "5531973554758";
 let currentUser = null; // { id, email, displayName }
 
 function showLoginScreen() {
@@ -66,6 +69,14 @@ function initLoginForm() {
   };
   btnEl.onclick = tryLogin;
   [userEl, passEl].forEach((el) => el.addEventListener("keydown", (e) => { if (e.key === "Enter") tryLogin(); }));
+
+  document.getElementById("btn-forgot-password").onclick = () => {
+    const username = userEl.value.trim();
+    const message = username
+      ? `Olá! Esqueci minha senha do Café Sinceridade Gestão. Meu usuário é: ${username}. Pode resetar pra mim?`
+      : `Olá! Esqueci minha senha do Café Sinceridade Gestão. Pode me ajudar a resetar?`;
+    window.open(`https://wa.me/${SUPPORT_WHATSAPP}?text=${encodeURIComponent(message)}`, "_blank");
+  };
 }
 
 document.getElementById("btn-logout").onclick = async () => {
