@@ -361,9 +361,11 @@ end $$;
 create table if not exists profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   display_name text not null,
+  username text,
   created_at timestamptz not null default now()
 );
 alter table profiles enable row level security;
+create unique index if not exists profiles_username_unique on profiles (lower(username));
 
 drop policy if exists "profiles select authenticated" on profiles;
 create policy "profiles select authenticated" on profiles
@@ -385,8 +387,12 @@ security definer
 set search_path = public
 as $$
 begin
-  insert into public.profiles (id, display_name)
-  values (new.id, coalesce(new.raw_user_meta_data->>'display_name', split_part(new.email, '@', 1)))
+  insert into public.profiles (id, display_name, username)
+  values (
+    new.id,
+    coalesce(new.raw_user_meta_data->>'display_name', split_part(new.email, '@', 1)),
+    lower(coalesce(new.raw_user_meta_data->>'username', split_part(new.email, '@', 1)))
+  )
   on conflict (id) do nothing;
   return new;
 end;
@@ -396,6 +402,98 @@ drop trigger if exists on_auth_user_created on auth.users;
 create trigger on_auth_user_created
   after insert on auth.users
   for each row execute function public.handle_new_user();
+
+-- Preenche o "username" de contas que já existiam antes desta atualização
+-- (criadas quando o login ainda pedia e-mail direto). Só mexe em quem
+-- ainda não tem username definido — não sobrescreve nada.
+update profiles p
+set username = lower(split_part(u.email, '@', 1))
+from auth.users u
+where p.id = u.id and p.username is null;
+
+-- ── Login por nome de usuário (em vez de digitar o e-mail inteiro) ──────
+-- Essa tabela guarda o vínculo "nome de usuário -> e-mail", mas NINGUÉM
+-- consegue ler ela direto (nem autenticado, nem anônimo — não existe
+-- nenhuma "policy" pra ela). A única forma de consultar é através da
+-- função abaixo, que só devolve o e-mail de UM usuário por vez, dado o
+-- nome dele — não dá pra "vazar" a lista inteira de usuários por aqui.
+create table if not exists username_lookup (
+  username text primary key,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  email text not null
+);
+alter table username_lookup enable row level security;
+
+create or replace function public.get_email_for_username(p_username text)
+returns text
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select email from username_lookup where username = lower(trim(p_username));
+$$;
+
+-- Libera qualquer pessoa (mesmo sem estar logada ainda) executar SÓ essa
+-- função específica — é o mínimo necessário pra tela de login funcionar
+-- (ela precisa descobrir o e-mail antes de tentar autenticar).
+grant execute on function public.get_email_for_username(text) to anon, authenticated;
+
+-- Mantém "username_lookup" sempre sincronizada com profiles.username.
+create or replace function public.sync_username_lookup()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_email text;
+begin
+  select email into v_email from auth.users where id = new.id;
+  delete from username_lookup where user_id = new.id;
+  if new.username is not null and v_email is not null then
+    insert into username_lookup (username, user_id, email)
+    values (lower(new.username), new.id, v_email)
+    on conflict (username) do update set user_id = excluded.user_id, email = excluded.email;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_sync_username_lookup on profiles;
+create trigger trg_sync_username_lookup
+  after insert or update of username on profiles
+  for each row execute function public.sync_username_lookup();
+
+-- Complemento de segurança: se o e-mail for editado DIRETO na tela
+-- Authentication > Users (em vez de via profiles), o gatilho acima não
+-- dispara sozinho — esse aqui cobre esse caso, mantendo o "username"
+-- sempre apontando pro e-mail de verdade do usuário, não importa por
+-- onde ele foi alterado.
+create or replace function public.sync_username_lookup_on_email_change()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  update username_lookup set email = new.email where user_id = new.id;
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_sync_email_on_auth_users on auth.users;
+create trigger trg_sync_email_on_auth_users
+  after update of email on auth.users
+  for each row execute function public.sync_username_lookup_on_email_change();
+
+-- Sincronização inicial (pega quem já tinha username preenchido pelo
+-- backfill acima, mas cujo trigger pode não ter disparado retroativamente).
+insert into username_lookup (username, user_id, email)
+select p.username, p.id, u.email
+from profiles p join auth.users u on u.id = p.id
+where p.username is not null
+on conflict (username) do update set user_id = excluded.user_id, email = excluded.email;
 
 -- Log de auditoria: registra AUTOMATICAMENTE, direto no banco, toda vez
 -- que alguém cria/edita/apaga algo em qualquer tabela do sistema — com
