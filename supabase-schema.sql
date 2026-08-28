@@ -361,9 +361,13 @@ end $$;
 create table if not exists profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   display_name text not null,
-  username text,
   created_at timestamptz not null default now()
 );
+-- "create table if not exists" não adiciona coluna em tabela que já
+-- existe (só cria do zero) — por isso a coluna nova vem sempre à parte,
+-- como alter table, pra funcionar tanto em banco novo quanto no que você
+-- já vinha usando.
+alter table profiles add column if not exists username text;
 alter table profiles enable row level security;
 create unique index if not exists profiles_username_unique on profiles (lower(username));
 
