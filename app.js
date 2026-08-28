@@ -100,7 +100,7 @@ let state = {
   auditUser: "", auditTable: "", auditAction: "todos", auditPeriod: "todos",
   auditCustomFrom: "", auditCustomTo: "",
   loading: true, loadError: null,
-  resumoMonth: todayISOMonthPrefix(),
+  resumoMonth: todayISOMonthPrefix(), resumoChartDimension: "pagamento",
   recompraFilter: { window: "7", clientId: "", productName: "", status: "" },
   pedidosPaymentFilter: "todos", pedidosDeliveryFilter: "todos", receberQuery: "",
   movPeriod: "hoje", movProduct: "", movUser: "", movLocation: "", movType: "todos",
@@ -3256,6 +3256,103 @@ function renderCaixa() {
   $("#caixa-user-filter").onchange = (e) => { state.caixaUser = e.target.value; renderCaixa(); };
 }
 
+// ---- Gráficos circulares (donut) — SVG puro, sem biblioteca externa ----
+const CHART_COLORS = ["#4C6B4F", "#C9922B", "#8C3A26", "#5C8760", "#1565C0", "#6A1B9A", "#E65100", "#9A8A6D", "#3E5941", "#B5432E"];
+
+// data: [{label, value}]. opts.money formata como R$; opts.decimals define
+// casas decimais quando não é dinheiro (ex.: quantidade de itens).
+function buildDonutChartSVG(data, opts = {}) {
+  const entries = data.filter((d) => Number(d.value) > 0);
+  const total = entries.reduce((s, d) => s + Number(d.value), 0);
+  if (total <= 0 || entries.length === 0) {
+    return `<div class="empty" style="padding:28px 16px;">Sem dados pra mostrar nesse recorte.</div>`;
+  }
+  const size = opts.size || 220;
+  const strokeWidth = opts.strokeWidth || 32;
+  const radius = (size - strokeWidth) / 2;
+  const cx = size / 2, cy = size / 2;
+  const circumference = 2 * Math.PI * radius;
+  const fmt = (v) => (opts.money ? money(v) : Number(v).toFixed(opts.decimals || 0));
+
+  let offset = 0;
+  const segments = entries.map((d, i) => {
+    const frac = Number(d.value) / total;
+    const dash = frac * circumference;
+    const el = `<circle cx="${cx}" cy="${cy}" r="${radius}" fill="none" stroke="${CHART_COLORS[i % CHART_COLORS.length]}" stroke-width="${strokeWidth}" stroke-dasharray="${dash} ${circumference - dash}" stroke-dashoffset="${-offset}" transform="rotate(-90 ${cx} ${cy})"><title>${escapeHtml(d.label)}: ${fmt(d.value)}</title></circle>`;
+    offset += dash;
+    return el;
+  }).join("");
+
+  const legend = entries.map((d, i) => {
+    const pct = ((Number(d.value) / total) * 100).toFixed(1);
+    return `
+      <div class="row" style="font-size:13px;padding:3px 0;">
+        <span style="display:flex;align-items:center;gap:6px;min-width:0;">
+          <span style="width:10px;height:10px;border-radius:3px;background:${CHART_COLORS[i % CHART_COLORS.length]};flex-shrink:0;"></span>
+          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(d.label)}</span>
+        </span>
+        <span class="mono" style="color:var(--muted);flex-shrink:0;padding-left:8px;">${fmt(d.value)} <span style="color:var(--muted2);">(${pct}%)</span></span>
+      </div>`;
+  }).join("");
+
+  return `
+    <div style="display:flex;flex-direction:column;align-items:center;gap:16px;">
+      <svg viewBox="0 0 ${size} ${size}" width="${size}" height="${size}" style="max-width:100%;">
+        ${segments}
+        <text x="${cx}" y="${cy - 6}" text-anchor="middle" font-size="12" fill="var(--muted2)" font-family="Inter, sans-serif">Total</text>
+        <text x="${cx}" y="${cy + 16}" text-anchor="middle" font-size="15" font-weight="600" fill="var(--ink)" font-family="Inter, sans-serif">${fmt(total)}</text>
+      </svg>
+      <div style="width:100%;">${legend}</div>
+    </div>`;
+}
+
+// Agrupa e ordena um mapa {label: valor} em ranking, juntando o que passar
+// de "n" itens num grupo "Outros" — pra gráfico não ficar poluído.
+function topNWithOthers(map, n = 7) {
+  const entries = Object.entries(map).sort((a, b) => b[1] - a[1]);
+  if (entries.length <= n) return entries;
+  const top = entries.slice(0, n);
+  const restTotal = entries.slice(n).reduce((s, [, v]) => s + v, 0);
+  if (restTotal > 0) top.push(["Outros", restTotal]);
+  return top;
+}
+
+// Todos os recortes disponíveis pro gráfico interativo do Resumo — cada um
+// é um jeito diferente de "fatiar" as vendas do mês selecionado.
+function resumoChartDatasets(monthSales, monthPrefix) {
+  const byPayment = {};
+  monthSales.forEach((s) => { const l = paymentLabel(s.payment_method); byPayment[l] = (byPayment[l] || 0) + Number(s.total); });
+
+  const byProduct = {};
+  monthSales.forEach((s) => { byProduct[s.product_name] = (byProduct[s.product_name] || 0) + Number(s.total); });
+
+  const byClient = {};
+  monthSales.forEach((s) => { const l = s.client_name || "Cliente à vista"; byClient[l] = (byClient[l] || 0) + Number(s.total); });
+
+  const bySeller = {};
+  monthSales.forEach((s) => { const l = s.seller_name || "Sem vendedor"; bySeller[l] = (bySeller[l] || 0) + Number(s.total); });
+
+  const byLocation = {};
+  monthSales.forEach((s) => { const l = s.location || "Não informado"; byLocation[l] = (byLocation[l] || 0) + Number(s.total); });
+
+  const monthOrders = computeOrders().filter((o) => o.soldAt.slice(0, 7) === monthPrefix);
+  const byPaymentStatus = {};
+  monthOrders.forEach((o) => { const l = o.paymentStatus === "pago" ? "🟢 Pago" : "🔴 Pendente"; byPaymentStatus[l] = (byPaymentStatus[l] || 0) + Number(o.total); });
+  const byDeliveryStatus = {};
+  monthOrders.forEach((o) => { const l = o.statusDelivery === "entregue" ? "🟢 Entregue" : "🔴 Pendente"; byDeliveryStatus[l] = (byDeliveryStatus[l] || 0) + Number(o.total); });
+
+  const toData = (map) => topNWithOthers(map).map(([label, value]) => ({ label, value }));
+  return {
+    pagamento: { label: "Forma de pagamento", title: "Receita por forma de pagamento", data: toData(byPayment) },
+    produto: { label: "Produto", title: "Receita por produto", data: toData(byProduct) },
+    cliente: { label: "Cliente", title: "Receita por cliente", data: toData(byClient) },
+    vendedor: { label: "Vendedor", title: "Receita por vendedor", data: toData(bySeller) },
+    localidade: { label: "Localidade", title: "Receita por localidade da venda", data: toData(byLocation) },
+    status_pagamento: { label: "Status de pagamento", title: "Pedidos por status de pagamento", data: toData(byPaymentStatus) },
+    status_entrega: { label: "Status de entrega", title: "Pedidos por status de entrega", data: toData(byDeliveryStatus) },
+  };
+}
+
 // ---- Exportação para Excel ----
 function exportSheetsToExcel(sheets, filename) {
   if (typeof XLSX === "undefined") {
@@ -3378,9 +3475,6 @@ function renderResumo() {
   const stockValue = stockValueMhu + stockValueBh;
   const lowStock = state.products.filter((p) => p.min_stock > 0 && totalQty(p) <= p.min_stock);
 
-  const payTotals = { pix: 0, dinheiro: 0, cartao: 0, prazo: 0 };
-  monthSales.forEach((s) => { const key = payTotals.hasOwnProperty(s.payment_method) ? s.payment_method : "dinheiro"; payTotals[key] += Number(s.total); });
-
   const hasCostData = monthSales.some((s) => Number(s.cost_at_sale) > 0);
   const monthProfit = monthSales.reduce((sum, s) => sum + (Number(s.unit_price) - Number(s.cost_at_sale)) * Number(s.quantity) - Number(s.discount || 0), 0);
 
@@ -3404,6 +3498,9 @@ function renderResumo() {
   });
   const sellerRanking = Object.entries(salesBySeller).sort((a, b) => b[1] - a[1]);
 
+  const chartDatasets = resumoChartDatasets(monthSales, monthPrefix);
+  const activeChart = chartDatasets[state.resumoChartDimension] || chartDatasets.pagamento;
+
   const monthOptions = availableMonths.map((m) => {
     const [y, mo] = m.split("-");
     return `<option value="${m}" ${m === monthPrefix ? "selected" : ""}>${MONTH_NAMES[Number(mo) - 1]} de ${y}</option>`;
@@ -3426,19 +3523,18 @@ function renderResumo() {
     </div>
 
     <div class="card" style="margin-bottom:20px;">
-      <p style="margin:0 0 10px;font-size:13px;font-weight:500;color:var(--muted);">Recebido no mês por forma de pagamento</p>
-      ${PAYMENT_METHODS.map((m) => `
-        <div class="row" style="font-size:14px;padding:4px 0;">
-          <span><span class="badge ${m.cls}">${m.label}</span></span>
-          <span class="mono" style="color:var(--muted);">${money(payTotals[m.value])}</span>
-        </div>
-      `).join("")}
+      <p style="margin:0 0 4px;font-size:13px;font-weight:500;color:var(--muted);">📊 Painel (BI) — ${monthLabel()}</p>
+      <p style="margin:0 0 12px;font-size:12px;color:var(--muted2);">Escolha como quer fatiar as vendas do mês.</p>
+      <div class="rc-filter-pills" style="margin-bottom:14px;">
+        ${Object.entries(chartDatasets).map(([key, d]) => `<button class="rc-pill resumo-chart-pill ${state.resumoChartDimension === key ? "active" : ""}" data-dim="${key}">${d.label}</button>`).join("")}
+      </div>
+      <p style="margin:0 0 10px;font-size:13px;font-weight:500;color:var(--ink);">${activeChart.title}</p>
+      <div id="resumo-chart-wrap">${buildDonutChartSVG(activeChart.data, { money: true })}</div>
     </div>
 
     <div class="card" style="margin-bottom:20px;">
       <p style="margin:0 0 10px;font-size:13px;font-weight:500;color:var(--muted);">Valor em estoque por localidade</p>
-      <div class="row" style="font-size:14px;padding:4px 0;"><span>Manhuaçu</span><span class="mono" style="color:var(--muted);">${money(stockValueMhu)}</span></div>
-      <div class="row" style="font-size:14px;padding:4px 0;"><span>BH</span><span class="mono" style="color:var(--muted);">${money(stockValueBh)}</span></div>
+      ${buildDonutChartSVG([{ label: "Manhuaçu", value: stockValueMhu }, { label: "BH", value: stockValueBh }], { money: true, size: 180, strokeWidth: 26 })}
     </div>
 
     ${hasCostData ? `
@@ -3489,6 +3585,9 @@ function renderResumo() {
   `;
 
   $("#resumo-month-select").onchange = (e) => { state.resumoMonth = e.target.value; renderResumo(); };
+  $$(".resumo-chart-pill", $("#main")).forEach((btn) => {
+    btn.onclick = () => { state.resumoChartDimension = btn.dataset.dim; renderResumo(); };
+  });
   $("#btn-export-month").onclick = () => exportMonthSalesExcel(monthSales, monthLabel());
   $("#btn-export-full").onclick = () => exportFullReportExcel();
 }

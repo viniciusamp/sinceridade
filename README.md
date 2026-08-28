@@ -16,6 +16,21 @@ fazer login, nem você.
 
 ## Novidades desta versão
 
+- **Painel (BI) com gráficos circulares na aba Resumo.** Novo card logo
+  no topo, com um gráfico de rosca que você controla: escolhe o recorte
+  (Forma de pagamento, Produto, Cliente, Vendedor, Localidade, Status de
+  pagamento ou Status de entrega dos pedidos) e o gráfico recalcula na
+  hora, sempre baseado no mês selecionado. Quando tem muita coisa
+  diferente (ex.: muitos clientes), o gráfico agrupa automaticamente os
+  menores num "Outros", pra não ficar poluído.
+  - "Valor em estoque por localidade" (Manhuaçu × BH) também virou
+    gráfico circular.
+  - Os rankings detalhados (produtos, clientes, vendedores) continuam
+    existindo em lista logo abaixo — o gráfico é pra enxergar proporção
+    rápido, a lista é pra ver os números exatos.
+  - Não precisou de nenhuma biblioteca externa — é SVG feito na mão,
+    então não pesa nada a mais no carregamento do site.
+
 - **Verificação: vendas à vista e pagamentos de Contas a Receber já
   entram no Caixa** — conferi o código de ponta a ponta e confirmei que
   está funcionando. **Um detalhe importante pra você saber**: isso só
