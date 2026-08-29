@@ -108,6 +108,7 @@ let state = {
   receivables: [], receivablePayments: [], recompraContacts: [], orderDeliveries: [], stockEntries: [],
   cashRegisters: [], cashMovements: [], cashTransferAllocations: [],
   profiles: [], auditLog: [], productCostItems: [],
+  coffeeHarvests: [], coffeeHarvestCosts: [], coffeeMarketPrices: [],
   auditUser: "", auditTable: "", auditAction: "todos", auditPeriod: "todos",
   auditCustomFrom: "", auditCustomTo: "",
   loading: true, loadError: null,
@@ -414,6 +415,16 @@ async function loadAll() {
   const { data: productCostItems, error: e15 } = await db
     .from("product_cost_items").select("*").order("position", { ascending: true });
   if (e15) { console.warn("product_cost_items indisponível (rode o supabase-schema.sql):", e15.message); }
+  // Produção do Grão (Café Roça) — negócio separado do Café Sinceridade.
+  const { data: coffeeHarvests, error: e16 } = await db
+    .from("coffee_harvests").select("*").order("start_date", { ascending: false });
+  if (e16) { console.warn("coffee_harvests indisponível (rode o supabase-schema.sql):", e16.message); }
+  const { data: coffeeHarvestCosts, error: e17 } = await db
+    .from("coffee_harvest_costs").select("*").order("position", { ascending: true });
+  if (e17) { console.warn("coffee_harvest_costs indisponível (rode o supabase-schema.sql):", e17.message); }
+  const { data: coffeeMarketPrices, error: e18 } = await db
+    .from("coffee_market_prices").select("*").order("recorded_at", { ascending: false });
+  if (e18) { console.warn("coffee_market_prices indisponível (rode o supabase-schema.sql):", e18.message); }
   state.loadError = null;
   state.products = products || [];
   state.sales = sales || [];
@@ -430,6 +441,9 @@ async function loadAll() {
   state.profiles = profiles || [];
   state.auditLog = auditLog || [];
   state.productCostItems = productCostItems || [];
+  state.coffeeHarvests = coffeeHarvests || [];
+  state.coffeeHarvestCosts = coffeeHarvestCosts || [];
+  state.coffeeMarketPrices = coffeeMarketPrices || [];
   state.loading = false;
   render();
   updateBirthdayDot();
@@ -453,6 +467,9 @@ function subscribeRealtime() {
     .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, loadAll)
     .on("postgres_changes", { event: "*", schema: "public", table: "audit_log" }, loadAll)
     .on("postgres_changes", { event: "*", schema: "public", table: "product_cost_items" }, loadAll)
+    .on("postgres_changes", { event: "*", schema: "public", table: "coffee_harvests" }, loadAll)
+    .on("postgres_changes", { event: "*", schema: "public", table: "coffee_harvest_costs" }, loadAll)
+    .on("postgres_changes", { event: "*", schema: "public", table: "coffee_market_prices" }, loadAll)
     .subscribe((status) => {
       const label = $("#sync-indicator");
       if (!label) return;
@@ -1030,6 +1047,420 @@ function openSellerModal(seller) {
   };
 }
 
+// ---- Produção do Grão (Café Roça) ----
+// Negócio separado do Café Sinceridade: aqui é a produção do café em GRÃO
+// na fazenda, por safra, medida em quilos. Mesmo padrão de itens de custo
+// livres já usado no cadastro de produto (product_cost_items).
+async function addHarvest(data) {
+  const { data: row } = await db.from("coffee_harvests").insert({
+    name: data.name, start_date: data.startDate || null, end_date: data.endDate || null,
+    produced_kg: data.producedKg, status: data.status, note: data.note || null,
+  }).select().single();
+  return row;
+}
+async function updateHarvest(id, data) {
+  await db.from("coffee_harvests").update({
+    name: data.name, start_date: data.startDate || null, end_date: data.endDate || null,
+    produced_kg: data.producedKg, status: data.status, note: data.note || null,
+  }).eq("id", id);
+}
+async function deleteHarvest(id) { await db.from("coffee_harvests").delete().eq("id", id); }
+
+function harvestCostItemsFor(harvestId) {
+  return state.coffeeHarvestCosts.filter((it) => it.harvest_id === harvestId).sort((a, b) => a.position - b.position);
+}
+// Salvar sempre substitui a lista inteira — mesma lógica de syncProductCostItems.
+async function syncHarvestCostItems(harvestId, items) {
+  await db.from("coffee_harvest_costs").delete().eq("harvest_id", harvestId);
+  const rows = items
+    .filter((it) => it.label.trim())
+    .map((it, idx) => ({ harvest_id: harvestId, label: it.label.trim(), amount: Number(it.amount) || 0, position: idx }));
+  if (rows.length) await db.from("coffee_harvest_costs").insert(rows);
+}
+
+// Preço de mercado "mais recente" de uma safra considera tanto preços
+// registrados especificamente pra ela quanto preços gerais (harvest_id
+// nulo) — café é commodity, o preço de mercado nem sempre é por safra.
+function marketPricesFor(harvestId) {
+  return state.coffeeMarketPrices
+    .filter((p) => p.harvest_id === harvestId || p.harvest_id === null)
+    .sort((a, b) => (a.recorded_at < b.recorded_at ? 1 : -1));
+}
+function latestMarketPriceFor(harvestId) { return marketPricesFor(harvestId)[0] || null; }
+
+async function addMarketPrice({ harvestId, pricePerKg, source, recordedAt, loggedBy }) {
+  await db.from("coffee_market_prices").insert({
+    harvest_id: harvestId || null, price_per_kg: Number(pricePerKg), source: source || null,
+    recorded_at: recordedAt || new Date().toISOString(), logged_by: loggedBy || null,
+  });
+}
+async function deleteMarketPrice(id) { await db.from("coffee_market_prices").delete().eq("id", id); }
+
+function harvestTotalCost(harvestId) {
+  return harvestCostItemsFor(harvestId).reduce((s, it) => s + (Number(it.amount) || 0), 0);
+}
+// Painel gerencial de uma safra — mesmas fórmulas de lucro/margem/markup já
+// usadas no cadastro de produto, só trocando "preço de venda" por "preço de
+// mercado" e "custo do produto" por "custo por kg".
+function harvestPanel(harvest) {
+  const cost = harvestTotalCost(harvest.id);
+  const kg = Number(harvest.produced_kg || 0);
+  const costPerKg = kg > 0 ? cost / kg : 0;
+  const latest = latestMarketPriceFor(harvest.id);
+  const marketPrice = latest ? Number(latest.price_per_kg) : null;
+  const profitPerKg = marketPrice !== null ? marketPrice - costPerKg : null;
+  const totalProfit = profitPerKg !== null ? profitPerKg * kg : null;
+  const margin = marketPrice && marketPrice > 0 && profitPerKg !== null ? (profitPerKg / marketPrice) * 100 : null;
+  const markup = costPerKg > 0 && marketPrice !== null ? ((marketPrice / costPerKg) - 1) * 100 : null;
+  const priceIsStale = !latest || dateOnly(latest.recorded_at) !== todayISO();
+  return { cost, kg, costPerKg, latest, marketPrice, profitPerKg, totalProfit, margin, markup, priceIsStale };
+}
+
+// FUTURO: buscar o preço de mercado automaticamente via uma Supabase Edge
+// Function consultando uma API de dados de commodities com licença de uso
+// COMERCIAL. Não dá pra usar o CEPEA/ESALQ direto num sistema comercial —
+// os dados de lá são licenciados CC BY-NC (não-comercial) e não têm API
+// pública. Por enquanto o preço é sempre digitado à mão, depois de
+// conferir na fonte de referência (botão "Consultar cotação" na tela da
+// safra). Função vazia e não chamada em lugar nenhum — só deixa o lugar
+// marcado pra quando essa automação existir de verdade.
+async function fetchMarketPriceAutomatically() {
+  throw new Error("Busca automática de preço de mercado ainda não implementada.");
+}
+
+const COFFEE_MARKET_QUOTE_URL = "https://www.noticiasagricolas.com.br/cotacoes/cafe/indicador-cepea-esalq-cafe-arabica";
+
+function renderProducao() {
+  const sorted = [...state.coffeeHarvests].sort((a, b) => (a.start_date < b.start_date ? 1 : -1));
+  $("#main").innerHTML = `
+    <div class="row" style="margin-bottom:16px;">
+      <p style="font-size:13px;color:var(--muted);margin:0;">${sorted.length} safra${sorted.length === 1 ? "" : "s"} cadastrada${sorted.length === 1 ? "" : "s"}</p>
+      <button class="btn btn-dark" id="btn-new-harvest">+ Nova safra</button>
+    </div>
+    ${sorted.length === 0 ? `<div class="empty">Nenhuma safra cadastrada ainda. A Produção do Grão é um negócio separado do Café Sinceridade — cadastre a primeira safra pra começar a acompanhar custo, quilos produzidos e preço de mercado.</div>` : ""}
+    <div style="display:flex;flex-direction:column;gap:10px;">
+      ${sorted.map((h) => {
+        const panel = harvestPanel(h);
+        const period = h.start_date ? `${fmtDateBR(h.start_date)}${h.end_date ? " – " + fmtDateBR(h.end_date) : ""}` : "Período não informado";
+        return `
+        <div class="card" data-id="${h.id}" style="cursor:pointer;">
+          <div class="row" style="align-items:flex-start;">
+            <div style="min-width:0;">
+              <p style="margin:0;font-size:15px;font-weight:500;">${escapeHtml(h.name)}</p>
+              <p style="margin:4px 0 0;font-size:12px;color:var(--muted2);">${period}</p>
+            </div>
+            <div style="display:flex;gap:4px;flex-shrink:0;align-items:center;">
+              <span class="badge ${h.status === "finalizada" ? "badge-loc" : "badge-ok"}">${h.status === "finalizada" ? "Finalizada" : "Em andamento"}</span>
+              <button class="icon-btn btn-edit-harvest" title="Editar">✎</button>
+              <button class="icon-btn danger btn-delete-harvest" title="Remover">🗑</button>
+            </div>
+          </div>
+          <div class="loc-grid">
+            <div class="loc-block">
+              <span class="loc-label">Produzido</span>
+              <p class="mono" style="margin:2px 0 0;font-size:15px;">${Number(h.produced_kg || 0)} kg</p>
+            </div>
+            <div class="loc-block">
+              <span class="loc-label">Custo / kg</span>
+              <p class="mono" style="margin:2px 0 0;font-size:15px;">${money(panel.costPerKg)}</p>
+            </div>
+          </div>
+          <div class="row" style="margin-top:10px;">
+            <span style="font-size:12px;color:var(--muted2);">
+              ${panel.marketPrice !== null ? `Mercado: <span class="mono">${money(panel.marketPrice)}/kg</span>` : "Sem preço de mercado"}
+              ${panel.priceIsStale ? ` <span class="badge badge-low">sem preço hoje</span>` : ""}
+            </span>
+            <span class="mono" style="font-size:13px;font-weight:500;color:${panel.totalProfit === null ? "var(--muted2)" : panel.totalProfit >= 0 ? "var(--accent-dark)" : "var(--danger-text)"};">
+              ${panel.totalProfit === null ? "—" : money(panel.totalProfit)}
+            </span>
+          </div>
+        </div>`;
+      }).join("")}
+    </div>
+  `;
+  $("#btn-new-harvest").onclick = () => openHarvestModal(null);
+  $$(".card[data-id]", $("#main")).forEach((card) => {
+    const id = card.dataset.id;
+    const harvest = state.coffeeHarvests.find((h) => h.id === id);
+    if (!harvest) return;
+    card.onclick = () => openHarvestDetailModal(harvest);
+    $(".btn-edit-harvest", card).onclick = (e) => { e.stopPropagation(); openHarvestModal(harvest); };
+    $(".btn-delete-harvest", card).onclick = async (e) => {
+      e.stopPropagation();
+      if (confirm(`Remover a safra "${harvest.name}"? Isso também apaga os itens de custo dela.`)) await deleteHarvest(id);
+    };
+  });
+}
+
+function openHarvestModal(harvest) {
+  const isEdit = !!harvest;
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.style.zIndex = "60"; // pode abrir por cima do painel da safra
+  backdrop.innerHTML = `
+    <div class="modal">
+      <div class="row" style="margin-bottom:16px;">
+        <h3 class="serif" style="margin:0;font-size:17px;">${isEdit ? "Editar safra" : "Nova safra"}</h3>
+        <button class="icon-btn" id="modal-close">✕</button>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:14px;">
+        <div><label class="field-label">Nome da safra</label><input id="h-name" placeholder="Ex.: Safra 2026" value="${isEdit ? escapeHtml(harvest.name) : ""}" /></div>
+        <div class="grid2">
+          <div><label class="field-label">Início</label><input id="h-start" type="date" value="${isEdit && harvest.start_date ? harvest.start_date : ""}" /></div>
+          <div><label class="field-label">Fim (opcional)</label><input id="h-end" type="date" value="${isEdit && harvest.end_date ? harvest.end_date : ""}" /></div>
+        </div>
+        <div class="grid2">
+          <div><label class="field-label">Quantidade produzida (kg)</label><input id="h-kg" type="number" min="0" step="any" value="${isEdit ? harvest.produced_kg : ""}" placeholder="0" /></div>
+          <div><label class="field-label">Status</label>
+            <select id="h-status">
+              <option value="em_andamento" ${!isEdit || harvest.status === "em_andamento" ? "selected" : ""}>Em andamento</option>
+              <option value="finalizada" ${isEdit && harvest.status === "finalizada" ? "selected" : ""}>Finalizada</option>
+            </select>
+          </div>
+        </div>
+        <div><label class="field-label">Observação (opcional)</label><input id="h-note" value="${isEdit ? escapeHtml(harvest.note || "") : ""}" /></div>
+        ${!isEdit ? `<p style="margin:0;font-size:12px;color:var(--muted2);">Depois de criar, abra a safra na lista pra adicionar os itens de custo e o preço de mercado.</p>` : ""}
+        <div style="display:flex;gap:8px;margin-top:6px;">
+          <button class="btn" id="modal-cancel" style="flex:1;">Cancelar</button>
+          <button class="btn btn-accent" id="modal-save" style="flex:1;">Salvar</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.appendChild(backdrop);
+  backdrop.onclick = (e) => { if (e.target === backdrop) backdrop.remove(); };
+  $("#modal-close", backdrop).onclick = () => backdrop.remove();
+  $("#modal-cancel", backdrop).onclick = () => backdrop.remove();
+  $("#modal-save", backdrop).onclick = async () => {
+    const data = {
+      name: $("#h-name", backdrop).value.trim(),
+      startDate: $("#h-start", backdrop).value,
+      endDate: $("#h-end", backdrop).value,
+      producedKg: Number($("#h-kg", backdrop).value) || 0,
+      status: $("#h-status", backdrop).value,
+      note: $("#h-note", backdrop).value.trim(),
+    };
+    if (!data.name) return;
+    if (isEdit) await updateHarvest(harvest.id, data); else await addHarvest(data);
+    backdrop.remove();
+  };
+}
+
+function openMarketPriceModal(harvestId, onDone) {
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.style.zIndex = "60";
+  backdrop.innerHTML = `
+    <div class="modal">
+      <div class="row" style="margin-bottom:16px;">
+        <h3 class="serif" style="margin:0;font-size:17px;">Registrar preço de mercado</h3>
+        <button class="icon-btn" id="modal-close">✕</button>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:14px;">
+        <p style="margin:0;font-size:12px;color:var(--muted);">Confira o valor numa fonte de referência antes de registrar.</p>
+        <button class="btn" id="mp-quote-link" type="button">Consultar cotação ↗</button>
+        <div><label class="field-label">Preço por kg (R$)</label><input id="mp-price" type="number" min="0" step="any" placeholder="0,00" /></div>
+        <div class="grid2">
+          <div><label class="field-label">Data da cotação</label><input id="mp-date" type="date" value="${todayISO()}" /></div>
+          <div><label class="field-label">Fonte (opcional)</label><input id="mp-source" placeholder="Ex.: CEPEA/ESALQ" /></div>
+        </div>
+        <p style="margin:0;font-size:12px;color:var(--muted);">Registrado por <b>${escapeHtml(currentUser.displayName)}</b></p>
+        <div style="display:flex;gap:8px;margin-top:6px;">
+          <button class="btn" id="modal-cancel" style="flex:1;">Cancelar</button>
+          <button class="btn btn-accent" id="modal-save" style="flex:1;">Salvar</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.appendChild(backdrop);
+  backdrop.onclick = (e) => { if (e.target === backdrop) backdrop.remove(); };
+  $("#modal-close", backdrop).onclick = () => backdrop.remove();
+  $("#modal-cancel", backdrop).onclick = () => backdrop.remove();
+  $("#mp-quote-link", backdrop).onclick = () => window.open(COFFEE_MARKET_QUOTE_URL, "_blank");
+  $("#modal-save", backdrop).onclick = async () => {
+    const price = Number($("#mp-price", backdrop).value) || 0;
+    if (price <= 0) return;
+    const date = $("#mp-date", backdrop).value || todayISO();
+    await addMarketPrice({
+      harvestId, pricePerKg: price, source: $("#mp-source", backdrop).value.trim(),
+      recordedAt: new Date(date + "T12:00:00").toISOString(),
+      loggedBy: currentUser.displayName,
+    });
+    backdrop.remove();
+    onDone && onDone();
+  };
+}
+
+// Painel completo de uma safra: itens de custo (mesmo componente do
+// cadastro de produto), quantidade produzida, painel gerencial, gráfico de
+// composição do custo e histórico de preços de mercado.
+function openHarvestDetailModal(harvest) {
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `<div class="modal" id="hd-body" style="max-width:480px;"></div>`;
+  document.body.appendChild(backdrop);
+  backdrop.onclick = (e) => { if (e.target === backdrop) { backdrop.remove(); renderProducao(); } };
+
+  let costItems = harvestCostItemsFor(harvest.id).map((it) => ({ label: it.label, amount: Number(it.amount) }));
+  let producedKgValue = String(harvest.produced_kg ?? "");
+  const COST_SUGGESTIONS = ["Energia do secador", "Mão de obra", "Insumos", "Combustível", "Transporte", "Manutenção"];
+  const localTotalCost = () => costItems.reduce((s, it) => s + (Number(it.amount) || 0), 0);
+
+  function updatePanel() {
+    const cost = localTotalCost();
+    const kg = Number(producedKgValue) || 0;
+    const costPerKg = kg > 0 ? cost / kg : 0;
+    const latest = latestMarketPriceFor(harvest.id);
+    const marketPrice = latest ? Number(latest.price_per_kg) : null;
+    const profitPerKg = marketPrice !== null ? marketPrice - costPerKg : null;
+    const totalProfit = profitPerKg !== null ? profitPerKg * kg : null;
+    const margin = marketPrice && marketPrice > 0 && profitPerKg !== null ? (profitPerKg / marketPrice) * 100 : null;
+    const markup = costPerKg > 0 && marketPrice !== null ? ((marketPrice / costPerKg) - 1) * 100 : null;
+    const priceIsStale = !latest || dateOnly(latest.recorded_at) !== todayISO();
+
+    const totalEl = $("#hd-cost-total", backdrop);
+    if (totalEl) totalEl.innerHTML = `Custo total da safra: <b class="mono">${money(cost)}</b>`;
+
+    const panelEl = $("#hd-panel", backdrop);
+    if (panelEl) {
+      panelEl.innerHTML = `
+        <div class="metric"><div class="label">Custo / kg</div><div class="value mono">${money(costPerKg)}</div></div>
+        <div class="metric"><div class="label">Preço de mercado</div><div class="value mono">${marketPrice !== null ? money(marketPrice) : "—"}</div></div>
+        <div class="metric"><div class="label">Lucro estimado</div><div class="value mono" style="color:${totalProfit === null ? "inherit" : totalProfit >= 0 ? "var(--accent-dark)" : "var(--danger-text)"};">${totalProfit !== null ? money(totalProfit) : "—"}</div></div>
+        <div class="metric"><div class="label">Margem</div><div class="value mono">${margin !== null ? margin.toFixed(1) + "%" : "—"}</div></div>
+        <div class="metric"><div class="label">Markup</div><div class="value mono">${markup !== null ? markup.toFixed(1) + "%" : "—"}</div></div>
+        <div class="metric"><div class="label">Produzido</div><div class="value mono">${Number(kg.toFixed(3))} kg</div></div>
+      `;
+    }
+    const chartEl = $("#hd-chart", backdrop);
+    if (chartEl) {
+      chartEl.innerHTML = buildDonutChartSVG(
+        costItems.map((it) => ({ label: it.label || "—", value: Number(it.amount) || 0 })),
+        { money: true, size: 180, strokeWidth: 26 }
+      );
+    }
+    const warnEl = $("#hd-warning", backdrop);
+    if (warnEl) warnEl.style.display = priceIsStale ? "flex" : "none";
+  }
+
+  function paint() {
+    const h = state.coffeeHarvests.find((x) => x.id === harvest.id) || harvest;
+    const usedLabels = costItems.map((it) => it.label);
+    const chips = COST_SUGGESTIONS.filter((s) => !usedLabels.includes(s));
+    const prices = marketPricesFor(h.id);
+    const period = h.start_date ? `${fmtDateBR(h.start_date)}${h.end_date ? " – " + fmtDateBR(h.end_date) : ""}` : "Período não informado";
+
+    $("#hd-body", backdrop).innerHTML = `
+      <div class="row" style="margin-bottom:4px;">
+        <h3 class="serif" style="margin:0;font-size:17px;">${escapeHtml(h.name)}</h3>
+        <div style="display:flex;gap:2px;">
+          <button class="icon-btn" id="hd-edit" title="Editar dados da safra">✎</button>
+          <button class="icon-btn" id="hd-close">✕</button>
+        </div>
+      </div>
+      <p style="font-size:12px;color:var(--muted2);margin:0 0 16px;">${period} · ${h.status === "finalizada" ? "Finalizada" : "Em andamento"}</p>
+
+      <div id="hd-warning" class="card" style="background:var(--warn-bg);border-color:var(--warn-border);margin-bottom:16px;display:none;align-items:center;justify-content:space-between;gap:10px;">
+        <p style="margin:0;font-size:12px;color:var(--warn-text);">⚠️ Nenhum preço de mercado registrado hoje.</p>
+        <button class="btn" id="hd-quote-link" type="button" style="flex-shrink:0;font-size:12px;padding:6px 10px;">Consultar cotação ↗</button>
+      </div>
+
+      <p style="margin:0 0 8px;font-size:13px;font-weight:600;color:var(--muted);">📊 Painel gerencial</p>
+      <div class="grid2" id="hd-panel" style="margin-bottom:16px;"></div>
+
+      <p style="margin:0 0 8px;font-size:13px;font-weight:600;color:var(--muted);">Composição do custo</p>
+      <div id="hd-chart" style="margin-bottom:20px;"></div>
+
+      <p style="margin:0 0 8px;font-size:13px;font-weight:600;color:var(--muted);">Custos da safra</p>
+      <div><label class="field-label">Quantidade produzida (kg)</label><input id="hd-kg" type="number" min="0" step="any" value="${producedKgValue}" placeholder="0" /></div>
+      <div id="hd-cost-list" style="display:flex;flex-direction:column;gap:8px;margin-top:12px;">
+        ${costItems.length === 0 ? `<p style="margin:0;font-size:12px;color:var(--muted2);">Nenhum item de custo ainda — adicione abaixo.</p>` : costItems.map((it, idx) => `
+          <div class="cart-row" data-idx="${idx}">
+            <input class="hd-cost-label" data-idx="${idx}" value="${escapeHtml(it.label)}" placeholder="Nome do custo" style="flex:2;" />
+            <input class="hd-cost-amount" data-idx="${idx}" type="number" step="any" value="${it.amount}" placeholder="0,00" />
+            <button class="cart-remove hd-cost-remove" data-idx="${idx}">✕</button>
+          </div>
+        `).join("")}
+      </div>
+      ${chips.length ? `
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;">
+          ${chips.map((c) => `<button class="rc-pill hd-cost-chip" data-label="${escapeHtml(c)}" style="padding:5px 10px;">+ ${escapeHtml(c)}</button>`).join("")}
+        </div>` : ""}
+      <button class="btn" id="hd-add-cost" type="button" style="width:100%;margin-top:10px;">+ Outro custo</button>
+      <p id="hd-cost-total" style="margin:10px 0 0;font-size:13px;color:var(--muted);">Custo total da safra: <b class="mono">${money(localTotalCost())}</b></p>
+      <button class="btn btn-accent" id="hd-save-costs" type="button" style="width:100%;margin-top:12px;">Salvar custos e quantidade</button>
+
+      <p style="margin:20px 0 8px;font-size:13px;font-weight:600;color:var(--muted);">💰 Histórico de preço de mercado</p>
+      <button class="btn" id="hd-add-price" type="button" style="width:100%;margin-bottom:10px;">+ Registrar preço</button>
+      ${prices.length === 0 ? `<p style="font-size:12px;color:var(--muted2);">Nenhum preço registrado ainda.</p>` : `
+        <div style="display:flex;flex-direction:column;gap:6px;">
+          ${prices.map((p) => `
+            <div class="rc-detail" data-pid="${p.id}">
+              <span>${fmtDateBR(p.recorded_at)}${p.source ? " · " + escapeHtml(p.source) : ""}${p.harvest_id === null ? ` · <span style="color:var(--muted2);">geral</span>` : ""}</span>
+              <span style="display:flex;align-items:center;gap:6px;">
+                <b class="mono">${money(p.price_per_kg)}</b>
+                <button class="icon-btn danger hd-del-price" style="min-width:26px;min-height:26px;font-size:12px;padding:2px;" title="Excluir">🗑</button>
+              </span>
+            </div>`).join("")}
+        </div>`}
+
+      <button class="icon-btn danger" id="hd-delete-harvest" style="width:100%;margin-top:20px;" title="Excluir safra">🗑 Excluir safra</button>
+    `;
+    wire();
+    updatePanel();
+  }
+
+  function wire() {
+    $("#hd-close", backdrop).onclick = () => { backdrop.remove(); renderProducao(); };
+    $("#hd-edit", backdrop).onclick = () => openHarvestModal(state.coffeeHarvests.find((x) => x.id === harvest.id) || harvest);
+    const quoteBtn = $("#hd-quote-link", backdrop);
+    if (quoteBtn) quoteBtn.onclick = () => window.open(COFFEE_MARKET_QUOTE_URL, "_blank");
+    $("#hd-kg", backdrop).oninput = (e) => { producedKgValue = e.target.value; updatePanel(); };
+    $$(".hd-cost-label", backdrop).forEach((el) => {
+      el.oninput = () => { costItems[Number(el.dataset.idx)].label = el.value; };
+    });
+    $$(".hd-cost-amount", backdrop).forEach((el) => {
+      el.oninput = () => { costItems[Number(el.dataset.idx)].amount = Number(el.value) || 0; updatePanel(); };
+    });
+    $$(".hd-cost-remove", backdrop).forEach((btn) => {
+      btn.onclick = () => { costItems.splice(Number(btn.dataset.idx), 1); paint(); };
+    });
+    $$(".hd-cost-chip", backdrop).forEach((btn) => {
+      btn.onclick = () => { costItems.push({ label: btn.dataset.label, amount: 0 }); paint(); };
+    });
+    $("#hd-add-cost", backdrop).onclick = () => { costItems.push({ label: "", amount: 0 }); paint(); };
+    $("#hd-save-costs", backdrop).onclick = async (e) => {
+      const btn = e.currentTarget;
+      const original = btn.textContent;
+      btn.disabled = true; btn.textContent = "Salvando...";
+      const h = state.coffeeHarvests.find((x) => x.id === harvest.id) || harvest;
+      const kg = Number(producedKgValue) || 0;
+      await updateHarvest(h.id, {
+        name: h.name, startDate: h.start_date, endDate: h.end_date,
+        producedKg: kg, status: h.status, note: h.note,
+      });
+      await syncHarvestCostItems(h.id, costItems);
+      btn.disabled = false; btn.textContent = "Salvo ✓";
+      setTimeout(() => { btn.textContent = original; }, 1500);
+    };
+    $("#hd-add-price", backdrop).onclick = () => openMarketPriceModal(harvest.id, () => paint());
+    $$(".hd-del-price", backdrop).forEach((btn) => {
+      btn.onclick = async () => {
+        const row = btn.closest("[data-pid]");
+        if (confirm("Excluir este registro de preço?")) { await deleteMarketPrice(row.dataset.pid); paint(); }
+      };
+    });
+    $("#hd-delete-harvest", backdrop).onclick = async () => {
+      const h = state.coffeeHarvests.find((x) => x.id === harvest.id) || harvest;
+      if (confirm(`Excluir a safra "${h.name}"? Isso também apaga os itens de custo dela.`)) {
+        await deleteHarvest(h.id);
+        backdrop.remove();
+        renderProducao();
+      }
+    };
+  }
+
+  paint();
+}
+
 // ---- Rendering ----
 function render() {
   if (!configOk) return renderConfigMissing();
@@ -1057,6 +1488,7 @@ function render() {
   if (state.tab === "vendedores") renderVendedores();
   if (state.tab === "resumo") renderResumo();
   if (state.tab === "auditoria") renderAuditoria();
+  if (state.tab === "producao") renderProducao();
   updateBirthdayDot();
 }
 
@@ -1126,6 +1558,7 @@ function renderEstoque() {
               </div>
             </div>
             <div style="display:flex;gap:2px;flex-shrink:0;">
+              <button class="icon-btn btn-cost-history" title="Histórico de custo">📈</button>
               <button class="icon-btn btn-edit" title="Editar">✎</button>
               <button class="icon-btn danger btn-delete" title="Remover">🗑</button>
             </div>
@@ -1158,6 +1591,7 @@ function renderEstoque() {
     if (!product) return;
     card.style.cursor = "pointer";
     card.onclick = () => openProductModal(product);
+    $(".btn-cost-history", card).onclick = (e) => { e.stopPropagation(); openProductCostHistoryModal(product); };
     $(".btn-edit", card).onclick = (e) => { e.stopPropagation(); openProductModal(product); };
     $(".btn-delete", card).onclick = async (e) => { e.stopPropagation(); if (confirm(`Remover "${product.name}"?`)) await deleteProduct(id); };
     $(".btn-vender", card).onclick = (e) => { e.stopPropagation(); openNewOrderModal({ presetProductId: id }); };
@@ -1334,6 +1768,87 @@ function openProductModal(product) {
   }
 
   paint();
+}
+
+// ---- Histórico de custo do produto ----
+// Reaproveita o audit_log que já existe (trigger do banco grava sozinho a
+// cada save do produto, e o save sempre grava custo+preço juntos) — não
+// duplica nada em tabela nova. Faz uma consulta dedicada, sem o limite de
+// 500 registros que state.auditLog usa pra não pesar o carregamento geral
+// do app, porque aqui precisamos do histórico completo do produto.
+async function fetchProductCostHistory(productId) {
+  const { data, error } = await db
+    .from("audit_log").select("*")
+    .eq("table_name", "products").eq("record_id", productId)
+    .in("action", ["insert", "update"])
+    .order("created_at", { ascending: false });
+  if (error) { console.error(error); return []; }
+  return (data || []).map((a) => {
+    const d = a.new_data || {};
+    const cost = Number(d.cost || 0);
+    const price = Number(d.price || 0);
+    const markup = cost > 0 && price > 0 ? ((price / cost) - 1) * 100 : null;
+    return { date: a.created_at, cost, price, markup, changedBy: a.changed_by_name };
+  });
+}
+
+function openProductCostHistoryModal(product) {
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `<div class="modal" id="pch-body" style="max-width:440px;"><p style="text-align:center;color:var(--muted2);padding:24px 0;">Carregando histórico...</p></div>`;
+  document.body.appendChild(backdrop);
+  backdrop.onclick = (e) => { if (e.target === backdrop) backdrop.remove(); };
+
+  let filterYear = "todos";
+  let filterMonth = "todos";
+  let history = [];
+
+  function paint() {
+    const years = Array.from(new Set(history.map((h) => dateOnly(h.date).slice(0, 4)))).sort().reverse();
+    const filtered = history.filter((h) => {
+      if (filterYear !== "todos" && dateOnly(h.date).slice(0, 4) !== filterYear) return false;
+      if (filterMonth !== "todos" && dateOnly(h.date).slice(5, 7) !== filterMonth) return false;
+      return true;
+    });
+    $("#pch-body", backdrop).innerHTML = `
+      <div class="row" style="margin-bottom:4px;">
+        <h3 class="serif" style="margin:0;font-size:17px;">Histórico de custo</h3>
+        <button class="icon-btn" id="pch-close">✕</button>
+      </div>
+      <p style="font-size:12px;color:var(--muted2);margin:0 0 16px;">${escapeHtml(product.name)}</p>
+      ${history.length === 0 ? `<div class="empty">Nenhum registro de auditoria encontrado pra este produto ainda.</div>` : `
+        <div class="grid2" style="margin-bottom:16px;">
+          <select id="pch-year">
+            <option value="todos">Todos os anos</option>
+            ${years.map((y) => `<option value="${y}" ${filterYear === y ? "selected" : ""}>${y}</option>`).join("")}
+          </select>
+          <select id="pch-month">
+            <option value="todos">Todos os meses</option>
+            ${MONTH_NAMES.map((m, i) => `<option value="${String(i + 1).padStart(2, "0")}" ${filterMonth === String(i + 1).padStart(2, "0") ? "selected" : ""}>${m}</option>`).join("")}
+          </select>
+        </div>
+        ${filtered.length === 0 ? `<div class="empty">Nenhum registro nesse filtro.</div>` : `
+          <div style="display:flex;flex-direction:column;gap:8px;">
+            ${filtered.map((h) => `
+              <div class="card" style="padding:10px 12px;">
+                <div class="row">
+                  <span style="font-size:12px;color:var(--muted2);">${new Date(h.date).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
+                  <span style="font-size:11px;color:var(--muted2);">${h.changedBy ? escapeHtml(h.changedBy) : "—"}</span>
+                </div>
+                <div class="rc-detail"><span>Custo total</span><b class="mono">${money(h.cost)}</b></div>
+                <div class="rc-detail"><span>Preço de venda</span><b class="mono">${money(h.price)}</b></div>
+                <div class="rc-detail"><span>Markup</span><b class="mono">${h.markup !== null ? h.markup.toFixed(1) + "%" : "—"}</b></div>
+              </div>`).join("")}
+          </div>`}`}
+    `;
+    $("#pch-close", backdrop).onclick = () => backdrop.remove();
+    const yearSel = $("#pch-year", backdrop);
+    if (yearSel) yearSel.onchange = (e) => { filterYear = e.target.value; paint(); };
+    const monthSel = $("#pch-month", backdrop);
+    if (monthSel) monthSel.onchange = (e) => { filterMonth = e.target.value; paint(); };
+  }
+
+  fetchProductCostHistory(product.id).then((rows) => { history = rows; paint(); });
 }
 
 // ---- Vendas ----
@@ -3648,6 +4163,8 @@ const AUDIT_TABLE_LABELS = {
   receivable_payments: "Pagamento de conta a receber", recompra_contacts: "Contato de recompra",
   order_deliveries: "Entrega de pedido", cash_registers: "Caixa", cash_movements: "Movimentação de caixa",
   cash_transfer_allocations: "Conciliação de transferência",
+  coffee_harvests: "Safra de café", coffee_harvest_costs: "Custo de safra",
+  coffee_market_prices: "Preço de mercado do café",
 };
 const AUDIT_ACTION_LABELS = { insert: "Criou", update: "Editou", delete: "Excluiu" };
 const AUDIT_ACTION_ICON = { insert: "➕", update: "✎", delete: "🗑" };

@@ -562,7 +562,8 @@ begin
   foreach t in array array[
     'products','sales','stock_entries','clients','sellers',
     'receivables','receivable_payments','recompra_contacts','order_deliveries',
-    'cash_registers','cash_movements','cash_transfer_allocations','product_cost_items'
+    'cash_registers','cash_movements','cash_transfer_allocations','product_cost_items',
+    'coffee_harvests','coffee_harvest_costs','coffee_market_prices'
   ]
   loop
     execute format('drop trigger if exists trg_audit_%1$s on %1$s;', t);
@@ -583,5 +584,78 @@ begin
   exception when others then null; end;
   begin
     alter publication supabase_realtime add table product_cost_items;
+  exception when others then null; end;
+end $$;
+
+-- ============================================================
+-- PRODUÇÃO DO GRÃO (Café Roça)
+-- ============================================================
+-- Negócio separado do Café Sinceridade (que é o produto já processado
+-- que o resto deste arquivo controla). Aqui é a produção do café em GRÃO
+-- na fazenda, por safra/colheita, medida em quilos. Segue exatamente o
+-- mesmo padrão do resto do sistema: itens de custo livres (igual
+-- product_cost_items), RLS só pra autenticado, auditoria automática
+-- (trigger ligado mais abaixo, no mesmo laço genérico das outras
+-- tabelas) e realtime.
+
+create table if not exists coffee_harvests (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  start_date date,
+  end_date date,
+  produced_kg numeric not null default 0,
+  status text not null default 'em_andamento', -- em_andamento | finalizada
+  note text,
+  created_at timestamptz not null default now()
+);
+alter table coffee_harvests enable row level security;
+drop policy if exists "authenticated only coffee_harvests" on coffee_harvests;
+create policy "authenticated only coffee_harvests" on coffee_harvests
+  for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+
+-- Itens de custo LIVRES da safra (Energia do secador, Mão de obra,
+-- Insumos, Combustível, o que surgir) — mesmo padrão de product_cost_items.
+create table if not exists coffee_harvest_costs (
+  id uuid primary key default gen_random_uuid(),
+  harvest_id uuid not null references coffee_harvests(id) on delete cascade,
+  label text not null,
+  amount numeric not null default 0,
+  position int not null default 0,
+  created_at timestamptz not null default now()
+);
+alter table coffee_harvest_costs enable row level security;
+drop policy if exists "authenticated only coffee_harvest_costs" on coffee_harvest_costs;
+create policy "authenticated only coffee_harvest_costs" on coffee_harvest_costs
+  for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+
+-- Histórico de preço de mercado do café (informado manualmente, sempre
+-- com data — não é "o preço de hoje", é uma linha do tempo de cotações).
+-- harvest_id é opcional: pode ser um preço geral do mercado, sem estar
+-- ligado a nenhuma safra específica (nesse caso vale como referência
+-- pra todas as safras que ainda não tiverem um preço próprio).
+create table if not exists coffee_market_prices (
+  id uuid primary key default gen_random_uuid(),
+  harvest_id uuid references coffee_harvests(id) on delete set null,
+  price_per_kg numeric not null,
+  source text, -- ex.: "CEPEA/ESALQ"
+  recorded_at timestamptz not null default now(),
+  logged_by text,
+  created_at timestamptz not null default now()
+);
+alter table coffee_market_prices enable row level security;
+drop policy if exists "authenticated only coffee_market_prices" on coffee_market_prices;
+create policy "authenticated only coffee_market_prices" on coffee_market_prices
+  for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+
+do $$
+begin
+  begin
+    alter publication supabase_realtime add table coffee_harvests;
+  exception when others then null; end;
+  begin
+    alter publication supabase_realtime add table coffee_harvest_costs;
+  exception when others then null; end;
+  begin
+    alter publication supabase_realtime add table coffee_market_prices;
   exception when others then null; end;
 end $$;

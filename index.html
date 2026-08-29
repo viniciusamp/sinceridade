@@ -35,10 +35,13 @@
   .header-left{display:flex; flex-direction:column;}
   #btn-logout{background:none; border:none; color:#C9B896; cursor:pointer; font-size:18px; padding:4px; opacity:.7;}
   #btn-logout:hover{opacity:1;}
-  nav{display:flex; border-bottom:1px solid var(--border); background:var(--surface); position:sticky; top:0; z-index:5; overflow-x:auto; -webkit-overflow-scrolling:touch; scrollbar-width:none;}
+  nav{display:flex; align-items:center; border-bottom:1px solid var(--border); background:var(--surface); position:sticky; top:0; z-index:5; overflow-x:auto; -webkit-overflow-scrolling:touch; scrollbar-width:none;}
   nav::-webkit-scrollbar{display:none;}
   nav button{flex:0 0 auto; padding:10px 12px; background:none; border:none; border-bottom:2px solid transparent; font-size:12px; font-weight:500; color:var(--muted2); cursor:pointer; white-space:nowrap;}
   nav button.active{color:var(--ink); border-color:var(--accent);}
+  /* Divisor entre as abas do Café Sinceridade e as de Produção do Grão —
+     são dois negócios diferentes dentro do mesmo sistema. */
+  nav .nav-divider{flex:0 0 auto; width:1px; align-self:stretch; margin:8px 6px; background:var(--border-strong);}
   main{padding:20px;}
 
   /* ── Modo Desktop ──────────────────────────────────────── */
@@ -65,6 +68,7 @@
     border-bottom:none; border-left:3px solid transparent;
   }
   html[data-view="desktop"] nav button.active{ background:var(--bg); border-left-color:var(--accent); }
+  html[data-view="desktop"] nav .nav-divider{ width:auto; height:1px; align-self:stretch; margin:8px 20px; }
   html[data-view="desktop"] main{
     grid-area:main; padding:32px 40px; overflow-y:auto; height:100%;
   }
@@ -306,6 +310,8 @@
     <button data-tab="resumo">Resumo</button>
     <button data-tab="vendedores">Vendedores</button>
     <button data-tab="auditoria">Auditoria</button>
+    <span class="nav-divider" aria-hidden="true"></span>
+    <button data-tab="producao">Produção do Grão</button>
   </nav>
   <main id="main"></main>
 </div>
