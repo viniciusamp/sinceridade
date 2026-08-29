@@ -562,8 +562,7 @@ begin
   foreach t in array array[
     'products','sales','stock_entries','clients','sellers',
     'receivables','receivable_payments','recompra_contacts','order_deliveries',
-    'cash_registers','cash_movements','cash_transfer_allocations','product_cost_items',
-    'coffee_harvests','coffee_harvest_costs','coffee_market_prices'
+    'cash_registers','cash_movements','cash_transfer_allocations','product_cost_items'
   ]
   loop
     execute format('drop trigger if exists trg_audit_%1$s on %1$s;', t);
@@ -658,4 +657,22 @@ begin
   begin
     alter publication supabase_realtime add table coffee_market_prices;
   exception when others then null; end;
+end $$;
+
+-- Liga o gatilho de auditoria nas 3 tabelas novas. Fica separado do laço
+-- genérico lá em cima porque aquele já roda ANTES destas tabelas existirem
+-- (o script segue de cima pra baixo) — juntar tudo no mesmo laço dava erro
+-- "relation does not exist" na primeira vez que o script era executado.
+do $$
+declare
+  t text;
+begin
+  foreach t in array array['coffee_harvests','coffee_harvest_costs','coffee_market_prices']
+  loop
+    execute format('drop trigger if exists trg_audit_%1$s on %1$s;', t);
+    execute format(
+      'create trigger trg_audit_%1$s after insert or update or delete on %1$s for each row execute function public.log_audit_event();',
+      t
+    );
+  end loop;
 end $$;
