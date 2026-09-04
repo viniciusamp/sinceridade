@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Café Sinceridade Gestão</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>☕</text></svg>" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@500;600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -34,11 +35,51 @@
   .header-left{display:flex; flex-direction:column;}
   #btn-logout{background:none; border:none; color:#C9B896; cursor:pointer; font-size:18px; padding:4px; opacity:.7;}
   #btn-logout:hover{opacity:1;}
-  nav{display:flex; border-bottom:1px solid var(--border); background:var(--surface); position:sticky; top:0; z-index:5; overflow-x:auto; -webkit-overflow-scrolling:touch; scrollbar-width:none;}
+  nav{display:flex; align-items:center; border-bottom:1px solid var(--border); background:var(--surface); position:sticky; top:0; z-index:5; overflow-x:auto; -webkit-overflow-scrolling:touch; scrollbar-width:none;}
   nav::-webkit-scrollbar{display:none;}
   nav button{flex:0 0 auto; padding:10px 12px; background:none; border:none; border-bottom:2px solid transparent; font-size:12px; font-weight:500; color:var(--muted2); cursor:pointer; white-space:nowrap;}
   nav button.active{color:var(--ink); border-color:var(--accent);}
+  /* Divisor entre as abas do Café Sinceridade e as de Produção do Grão —
+     são dois negócios diferentes dentro do mesmo sistema. */
+  nav .nav-divider{flex:0 0 auto; width:1px; align-self:stretch; margin:8px 6px; background:var(--border-strong);}
   main{padding:20px;}
+
+  /* ── Modo Desktop ──────────────────────────────────────── */
+  /* Reorganiza o mesmo HTML (header/nav/main) num layout de barra lateral
+     pra telas grandes, sem precisar mudar nenhuma tela individualmente.
+     O #app inteiro trava em 100vh e só o "main" rola por dentro — assim
+     o cabeçalho e a barra lateral nunca se movem, em nenhuma tela. */
+  html[data-view="desktop"] body{ background:var(--surface); overflow:hidden; }
+  html[data-view="desktop"] #app{
+    max-width:1180px; margin:0 auto; box-shadow:0 0 60px rgba(0,0,0,.10);
+    display:grid; grid-template-columns:220px 1fr; grid-template-rows:auto 1fr;
+    grid-template-areas:"header header" "nav main";
+    height:100vh; min-height:0;
+  }
+  html[data-view="desktop"] header{ grid-area:header; }
+  html[data-view="desktop"] nav{
+    grid-area:nav; flex-direction:column; align-items:stretch;
+    overflow-x:visible; overflow-y:auto; position:static;
+    height:100%; border-right:1px solid var(--border); border-bottom:none;
+    padding:12px 0;
+  }
+  html[data-view="desktop"] nav button{
+    text-align:left; padding:10px 20px; font-size:13px;
+    border-bottom:none; border-left:3px solid transparent;
+  }
+  html[data-view="desktop"] nav button.active{ background:var(--bg); border-left-color:var(--accent); }
+  html[data-view="desktop"] nav .nav-divider{ width:auto; height:1px; align-self:stretch; margin:8px 20px; }
+  html[data-view="desktop"] main{
+    grid-area:main; padding:32px 40px; overflow-y:auto; height:100%;
+  }
+  html[data-view="desktop"] main > *{ max-width:760px; margin-left:auto; margin-right:auto; }
+  html[data-view="desktop"] .grid2{ grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); }
+  html[data-view="desktop"] .modal-backdrop{ align-items:center; }
+  @media (max-width:860px){
+    /* Tela grande mas não gigante (notebook pequeno): ainda usa a barra
+       lateral, mas sem forçar largura mínima que não caiba. */
+    html[data-view="desktop"] #app{ grid-template-columns:180px 1fr; }
+  }
   .btn{border-radius:10px; border:1px solid var(--border-strong); padding:9px 14px; font-size:13px; font-weight:500; cursor:pointer; background:var(--card); color:var(--ink);}
   .btn:hover{background:var(--surface);}
   .btn-dark{background:var(--brand); color:#fff; border:none;}
@@ -68,6 +109,10 @@
   .modal{background:var(--surface); border:1px solid var(--border-strong); border-radius:16px; padding:20px; width:100%; max-width:420px; max-height:90vh; overflow-y:auto;}
   .empty{text-align:center; padding:40px 16px; border:1px dashed var(--border-strong); border-radius:12px; color:var(--muted);}
   .qty-btn{width:28px; height:28px; border-radius:8px; border:1px solid var(--border-strong); background:var(--input-bg); display:flex; align-items:center; justify-content:center; cursor:pointer; color:var(--ink); font-size:16px;}
+  .cart-row{display:flex; align-items:center; gap:6px; margin-bottom:6px;}
+  .cart-row input, .cart-row select{width:auto; flex:1; min-width:0;}
+  .cart-remove{flex-shrink:0; border:none; background:none; color:var(--muted2); cursor:pointer; font-size:16px; padding:4px; min-width:28px; min-height:28px; border-radius:8px;}
+  .cart-remove:hover{color:var(--danger); background:var(--danger-bg);}
   .metric{background:var(--card); border-radius:12px; padding:14px; border:1px solid var(--border);}
   .metric .label{font-size:12px; color:var(--muted2); display:flex; align-items:center; gap:6px; margin-bottom:6px;}
   .metric .value{font-size:20px; font-weight:500;}
@@ -111,6 +156,8 @@
   #login-error{display:none; color:var(--danger); font-size:13px; text-align:center; background:var(--danger-bg); border-radius:8px; padding:8px 12px;}
   #login-btn{width:100%; padding:12px; border-radius:10px; background:var(--brand); color:#fff; border:none; font-size:15px; font-weight:500; cursor:pointer; font-family:inherit;}
   #login-btn:hover{background:var(--brand-dark);}
+  #btn-forgot-password{width:100%; background:none; border:none; color:var(--muted); font-size:12px; text-decoration:underline; cursor:pointer; padding:4px; font-family:inherit;}
+  #btn-forgot-password:hover{color:var(--ink);}
   #login-footer{font-size:11px; color:var(--muted2); text-align:center;}
 
   /* ── Wheel Picker ─────────────────────────────────────── */
@@ -222,7 +269,7 @@
     <div id="login-fields">
       <div>
         <label class="field-label">Usuário</label>
-        <input id="login-user" type="text" placeholder="admin" autocomplete="username" />
+        <input id="login-user" type="text" placeholder="ex.: vinicius" autocomplete="username" autocapitalize="none" />
       </div>
       <div>
         <label class="field-label">Senha</label>
@@ -230,6 +277,7 @@
       </div>
       <p id="login-error">Usuário ou senha incorretos. Tente novamente.</p>
       <button id="login-btn">Entrar →</button>
+      <button id="btn-forgot-password" type="button">Esqueci minha senha</button>
     </div>
     <p id="login-footer">Café Sinceridade — Sistema interno de controle</p>
   </div>
@@ -243,6 +291,7 @@
       <p><span id="sync-indicator"><span class="sync-dot off"></span>conectando...</span></p>
     </div>
     <div style="display:flex;align-items:center;gap:4px;">
+      <button id="btn-view" title="Alternar versão desktop/celular" style="background:none;border:none;color:#C9B896;cursor:pointer;font-size:18px;padding:4px;opacity:.85;">🖥️</button>
       <button id="btn-theme" title="Alternar tema claro/escuro" style="background:none;border:none;color:#C9B896;cursor:pointer;font-size:18px;padding:4px;opacity:.85;">🌙</button>
       <button id="btn-birthday" title="Aniversariantes de hoje" style="position:relative;background:none;border:none;color:#C9B896;cursor:pointer;font-size:18px;padding:4px;opacity:.85;">
         🎂<span id="birthday-dot"></span>
@@ -260,6 +309,9 @@
     <button data-tab="receber">A Receber</button>
     <button data-tab="resumo">Resumo</button>
     <button data-tab="vendedores">Vendedores</button>
+    <button data-tab="auditoria">Auditoria</button>
+    <span class="nav-divider" aria-hidden="true"></span>
+    <button data-tab="producao">Produção do Grão</button>
   </nav>
   <main id="main"></main>
 </div>
