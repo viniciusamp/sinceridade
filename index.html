@@ -157,8 +157,8 @@
   #login-error, .auth-error{display:none; color:var(--danger); font-size:13px; text-align:center; background:var(--danger-bg); border-radius:8px; padding:8px 12px;}
   #login-btn, .login-btn{width:100%; padding:12px; border-radius:10px; background:var(--brand); color:#fff; border:none; font-size:15px; font-weight:500; cursor:pointer; font-family:inherit;}
   #login-btn:hover, .login-btn:hover{background:var(--brand-dark);}
-  #btn-forgot-password{width:100%; background:none; border:none; color:var(--muted); font-size:12px; text-decoration:underline; cursor:pointer; padding:4px; font-family:inherit;}
-  #btn-forgot-password:hover{color:var(--ink);}
+  #btn-forgot-password, .auth-link-btn{width:100%; background:none; border:none; color:var(--muted); font-size:12px; text-decoration:underline; cursor:pointer; padding:4px; font-family:inherit;}
+  #btn-forgot-password:hover, .auth-link-btn:hover{color:var(--ink);}
   #login-footer{font-size:11px; color:var(--muted2); text-align:center;}
 
   /* ── Wheel Picker ─────────────────────────────────────── */
@@ -291,6 +291,7 @@
       </div>
       <p id="reset-error" class="auth-error"></p>
       <button id="reset-save-btn" class="login-btn">Salvar nova senha →</button>
+      <button id="reset-cancel-btn" type="button" class="auth-link-btn">Cancelar e voltar ao login</button>
     </div>
     <p id="login-footer">Café Sinceridade — Sistema interno de controle</p>
   </div>

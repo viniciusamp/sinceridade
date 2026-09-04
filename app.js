@@ -19,6 +19,25 @@ function showResetPasswordFields(subText) {
   document.getElementById("reset-fields").style.display = "flex";
 }
 
+// ---- Trava de segurança do link de recuperação ----
+// Só clicar no link do e-mail já cria uma sessão válida no navegador (é
+// assim que o Supabase Auth deixa a gente chamar updateUser() pra trocar a
+// senha). Sem essa marca, se a pessoa saísse da tela SEM trocar a senha,
+// essa sessão continuaria salva e o próximo acesso entraria direto no
+// sistema, pulando a troca de senha inteira. Essa marca em localStorage
+// garante que, enquanto a senha não for trocada de verdade (ou a pessoa
+// cancelar explicitamente), o app NUNCA trata essa sessão como login normal.
+const PENDING_RECOVERY_KEY = "cafe_app_pending_recovery";
+function markPendingRecovery() {
+  try { localStorage.setItem(PENDING_RECOVERY_KEY, "1"); } catch (e) { /* ignora se localStorage não disponível */ }
+}
+function clearPendingRecovery() {
+  try { localStorage.removeItem(PENDING_RECOVERY_KEY); } catch (e) { /* ignora */ }
+}
+function hasPendingRecovery() {
+  try { return localStorage.getItem(PENDING_RECOVERY_KEY) === "1"; } catch (e) { return false; }
+}
+
 async function fetchCurrentUserProfile(authUser) {
   const { data } = await db.from("profiles").select("display_name").eq("id", authUser.id).single();
   currentUser = {
@@ -139,12 +158,27 @@ function initLoginForm() {
       resetErrEl.style.display = "block";
       return;
     }
+    // Senha trocada de verdade agora sim pode liberar essa sessão como um
+    // login normal — remove a trava de recuperação pendente.
+    clearPendingRecovery();
     // A sessão criada pelo link de recuperação já é uma sessão válida —
     // não precisa sair e logar de novo. Só limpa o token da URL e recarrega;
     // o boot() normal encontra essa sessão e já entra direto no sistema.
     alert("Senha atualizada! Você já está conectado.");
     location.href = location.pathname;
   };
+
+  // Escape hatch: se a pessoa entrou na tela de redefinir por engano, ou o
+  // link expirou e ela quer só voltar a tentar logar normalmente. Sai da
+  // sessão de recuperação (que nunca deve virar acesso normal sem senha
+  // trocada) e volta pra tela de login limpa.
+  const resetCancelBtn = document.getElementById("reset-cancel-btn");
+  if (resetCancelBtn) {
+    resetCancelBtn.onclick = async () => {
+      clearPendingRecovery();
+      await db.auth.signOut(); // dispara SIGNED_OUT -> location.reload() (listener já registrado no boot())
+    };
+  }
 }
 
 document.getElementById("btn-logout").onclick = async () => {
@@ -4451,9 +4485,15 @@ async function boot() {
   // volta pra cá com "type=recovery" na URL (no hash ou na query, dependendo
   // do fluxo). Verifica isso ANTES de mais nada, direto na URL — assim não
   // depende de timing de evento nenhum do supabase-js.
+  //
+  // "hasPendingRecovery()" cobre o caso da pessoa ter clicado no link, saído
+  // sem trocar a senha, e voltado depois SEM o "type=recovery" na URL — sem
+  // essa trava, a sessão que o link já criou entraria direto no sistema,
+  // pulando a troca de senha (a URL sozinha não é suficiente pra decidir).
   const isRecoveryLink = /type=recovery/.test(window.location.hash) || /type=recovery/.test(window.location.search);
-  if (isRecoveryLink) {
-    await db.auth.getSession(); // deixa o supabase-js processar o token da URL
+  if (isRecoveryLink || hasPendingRecovery()) {
+    markPendingRecovery();
+    await db.auth.getSession(); // deixa o supabase-js processar o token da URL, se houver
     showResetPasswordFields();
     showLoginScreen();
   } else {
