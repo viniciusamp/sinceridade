@@ -1,8 +1,5 @@
 // ---- Auth (Supabase Auth de verdade — cada pessoa com o próprio login) ----
 const PIX_KEY = "09156713606";
-// Número de WhatsApp de quem pode resetar senha de usuário (com DDI+DDD,
-// só números, sem espaço/traço/parêntese — ex.: 55 + DDD + número).
-const SUPPORT_WHATSAPP = "5531973554758";
 let currentUser = null; // { id, email, displayName }
 
 function showLoginScreen() {
@@ -10,6 +7,16 @@ function showLoginScreen() {
 }
 function hideLoginScreen() {
   document.getElementById("login-screen").style.display = "none";
+}
+
+// Troca a tela de login (usuário/senha) pela tela de "definir nova senha",
+// usada quando a pessoa chega pelo link do e-mail de recuperação. Reaproveita
+// o mesmo card de login — só troca o texto e qual formulário fica visível.
+function showResetPasswordFields(subText) {
+  document.getElementById("login-title").textContent = "Redefinir senha";
+  document.getElementById("login-sub").textContent = subText || "Escolha uma nova senha pra sua conta.";
+  document.getElementById("login-fields").style.display = "none";
+  document.getElementById("reset-fields").style.display = "flex";
 }
 
 async function fetchCurrentUserProfile(authUser) {
@@ -70,12 +77,73 @@ function initLoginForm() {
   btnEl.onclick = tryLogin;
   [userEl, passEl].forEach((el) => el.addEventListener("keydown", (e) => { if (e.key === "Enter") tryLogin(); }));
 
-  document.getElementById("btn-forgot-password").onclick = () => {
-    const username = userEl.value.trim();
-    const message = username
-      ? `Olá! Esqueci minha senha do Café Sinceridade Gestão. Meu usuário é: ${username}. Pode resetar pra mim?`
-      : `Olá! Esqueci minha senha do Café Sinceridade Gestão. Pode me ajudar a resetar?`;
-    window.open(`https://wa.me/${SUPPORT_WHATSAPP}?text=${encodeURIComponent(message)}`, "_blank");
+  // "Esqueci minha senha" — dispara o e-mail de recuperação de verdade do
+  // Supabase Auth (link único, expira sozinho). Como o login é por usuário
+  // (não e-mail), primeiro descobre o e-mail por trás pela mesma função do
+  // banco usada no login, sem nunca mostrar esse e-mail na tela. A mensagem
+  // final é SEMPRE a mesma, exista ou não o usuário — evita alguém descobrir
+  // quem tem conta no sistema só testando nomes de usuário.
+  const forgotBtn = document.getElementById("btn-forgot-password");
+  forgotBtn.onclick = async () => {
+    const username = userEl.value.trim().toLowerCase();
+    if (!username) {
+      alert("Digite seu usuário no campo acima e clique em \"Esqueci minha senha\" de novo.");
+      userEl.focus();
+      return;
+    }
+    errEl.style.display = "none";
+    const original = forgotBtn.textContent;
+    forgotBtn.disabled = true;
+    forgotBtn.textContent = "Enviando...";
+    try {
+      const { data: email } = await db.rpc("get_email_for_username", { p_username: username });
+      if (email) {
+        await db.auth.resetPasswordForEmail(email, {
+          redirectTo: window.location.origin + window.location.pathname,
+        });
+      }
+    } catch (err) {
+      console.error(err);
+    }
+    forgotBtn.disabled = false;
+    forgotBtn.textContent = original;
+    document.getElementById("login-sub").textContent =
+      "Se esse usuário existir, enviamos um e-mail com um link pra redefinir a senha. Confira sua caixa de entrada (e o spam).";
+  };
+
+  // Tela de "definir nova senha" (chega aqui pelo link do e-mail).
+  const resetBtn = document.getElementById("reset-save-btn");
+  const resetErrEl = document.getElementById("reset-error");
+  resetBtn.onclick = async () => {
+    resetErrEl.style.display = "none";
+    const p1 = document.getElementById("reset-pass1").value;
+    const p2 = document.getElementById("reset-pass2").value;
+    if (p1.length < 6) {
+      resetErrEl.textContent = "A senha precisa ter pelo menos 6 caracteres.";
+      resetErrEl.style.display = "block";
+      return;
+    }
+    if (p1 !== p2) {
+      resetErrEl.textContent = "As senhas não coincidem.";
+      resetErrEl.style.display = "block";
+      return;
+    }
+    const original = resetBtn.textContent;
+    resetBtn.disabled = true;
+    resetBtn.textContent = "Salvando...";
+    const { error } = await db.auth.updateUser({ password: p1 });
+    resetBtn.disabled = false;
+    resetBtn.textContent = original;
+    if (error) {
+      resetErrEl.textContent = "Não consegui salvar. O link pode ter expirado — peça um novo \"Esqueci minha senha\".";
+      resetErrEl.style.display = "block";
+      return;
+    }
+    // A sessão criada pelo link de recuperação já é uma sessão válida —
+    // não precisa sair e logar de novo. Só limpa o token da URL e recarrega;
+    // o boot() normal encontra essa sessão e já entra direto no sistema.
+    alert("Senha atualizada! Você já está conectado.");
+    location.href = location.pathname;
   };
 }
 
@@ -4379,12 +4447,23 @@ async function boot() {
 
   initLoginForm();
 
-  const { data: sessionData } = await db.auth.getSession();
-  if (sessionData && sessionData.session && sessionData.session.user) {
-    await fetchCurrentUserProfile(sessionData.session.user);
-    await bootAfterLogin();
-  } else {
+  // Link de recuperação de senha do e-mail: o Supabase manda a pessoa de
+  // volta pra cá com "type=recovery" na URL (no hash ou na query, dependendo
+  // do fluxo). Verifica isso ANTES de mais nada, direto na URL — assim não
+  // depende de timing de evento nenhum do supabase-js.
+  const isRecoveryLink = /type=recovery/.test(window.location.hash) || /type=recovery/.test(window.location.search);
+  if (isRecoveryLink) {
+    await db.auth.getSession(); // deixa o supabase-js processar o token da URL
+    showResetPasswordFields();
     showLoginScreen();
+  } else {
+    const { data: sessionData } = await db.auth.getSession();
+    if (sessionData && sessionData.session && sessionData.session.user) {
+      await fetchCurrentUserProfile(sessionData.session.user);
+      await bootAfterLogin();
+    } else {
+      showLoginScreen();
+    }
   }
 
   db.auth.onAuthStateChange((event) => {

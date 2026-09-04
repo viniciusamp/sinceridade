@@ -152,10 +152,11 @@
   #login-icon{font-size:48px; text-align:center; line-height:1;}
   #login-title{margin:0; font-size:22px; text-align:center; font-family:'Fraunces',serif;}
   #login-sub{margin:0; font-size:13px; color:var(--muted); text-align:center;}
-  #login-fields{display:flex; flex-direction:column; gap:12px;}
-  #login-error{display:none; color:var(--danger); font-size:13px; text-align:center; background:var(--danger-bg); border-radius:8px; padding:8px 12px;}
-  #login-btn{width:100%; padding:12px; border-radius:10px; background:var(--brand); color:#fff; border:none; font-size:15px; font-weight:500; cursor:pointer; font-family:inherit;}
-  #login-btn:hover{background:var(--brand-dark);}
+  #login-fields, #reset-fields{display:flex; flex-direction:column; gap:12px;}
+  #reset-fields{display:none;}
+  #login-error, .auth-error{display:none; color:var(--danger); font-size:13px; text-align:center; background:var(--danger-bg); border-radius:8px; padding:8px 12px;}
+  #login-btn, .login-btn{width:100%; padding:12px; border-radius:10px; background:var(--brand); color:#fff; border:none; font-size:15px; font-weight:500; cursor:pointer; font-family:inherit;}
+  #login-btn:hover, .login-btn:hover{background:var(--brand-dark);}
   #btn-forgot-password{width:100%; background:none; border:none; color:var(--muted); font-size:12px; text-decoration:underline; cursor:pointer; padding:4px; font-family:inherit;}
   #btn-forgot-password:hover{color:var(--ink);}
   #login-footer{font-size:11px; color:var(--muted2); text-align:center;}
@@ -278,6 +279,18 @@
       <p id="login-error">Usuário ou senha incorretos. Tente novamente.</p>
       <button id="login-btn">Entrar →</button>
       <button id="btn-forgot-password" type="button">Esqueci minha senha</button>
+    </div>
+    <div id="reset-fields">
+      <div>
+        <label class="field-label">Nova senha</label>
+        <input id="reset-pass1" type="password" placeholder="••••••••" autocomplete="new-password" />
+      </div>
+      <div>
+        <label class="field-label">Confirmar nova senha</label>
+        <input id="reset-pass2" type="password" placeholder="••••••••" autocomplete="new-password" />
+      </div>
+      <p id="reset-error" class="auth-error"></p>
+      <button id="reset-save-btn" class="login-btn">Salvar nova senha →</button>
     </div>
     <p id="login-footer">Café Sinceridade — Sistema interno de controle</p>
   </div>

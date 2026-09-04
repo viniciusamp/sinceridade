@@ -16,18 +16,27 @@ fazer login, nem você.
 
 ## Novidades desta versão
 
-- **"Esqueci minha senha" na tela de login.** Novo link discreto embaixo
-  do botão "Entrar". Ao clicar, abre o **WhatsApp** já com uma mensagem
-  pronta pedindo o reset (incluindo o usuário, se a pessoa já tiver
-  digitado algo no campo). Não é reset automático — continua sendo você
-  (ou quem administra o sistema) que roda o comando de trocar a senha,
-  como já fazíamos, mas agora o pedido chega direto no seu WhatsApp, sem
-  a pessoa precisar descobrir como te avisar.
-  - **⚠️ Ação necessária**: abra o `app.js`, procure por `SUPPORT_WHATSAPP`
-    (bem no topo do arquivo) e troque o número de exemplo pelo seu WhatsApp
-    de verdade — só dígitos, com DDI e DDD (ex.: `5531999998888` pra um
-    número de Minas Gerais). Sem isso, o botão abre o WhatsApp mas não tem
-    pra quem mandar.
+- **"Esqueci minha senha" na tela de login — reset de verdade, por e-mail,
+  sem precisar de mim.** Link discreto embaixo do botão "Entrar". Ao
+  clicar, o Supabase Auth manda um e-mail de verdade pra pessoa, com um
+  link único que expira sozinho. Ela clica, define a senha nova ali mesmo
+  (a mesma tela de login vira uma tela de "Redefinir senha" quando chega
+  por esse link), e pronto — ninguém mais precisa mexer no painel do
+  Supabase pra trocar senha de ninguém. A mensagem de confirmação é
+  sempre a mesma, exista ou não o usuário digitado, pra não dar pra
+  descobrir quem tem conta só testando nomes.
+  - **⚠️ Ação obrigatória pra isso funcionar**: o Supabase, por padrão, só
+    manda pouquíssimos e-mails por hora (não é feito pra uso real). Você
+    precisa configurar um SMTP de verdade em **Authentication → Settings
+    → SMTP Settings** no painel do Supabase — por exemplo o
+    [Resend](https://resend.com) (100 e-mails grátis por dia, configuração
+    rápida). Sem isso, o botão funciona mas o e-mail nunca chega.
+  - Também é preciso adicionar o endereço onde o site está publicado em
+    **Authentication → URL Configuration → Redirect URLs** — senão o
+    Supabase recusa o link de recuperação por segurança.
+  - Opcional: em **Authentication → Email Templates → Reset Password**
+    dá pra traduzir/personalizar o texto do e-mail (o padrão vem em
+    inglês).
 
 - **Painel (BI) com gráficos circulares na aba Resumo.** Novo card logo
   no topo, com um gráfico de rosca que você controla: escolhe o recorte
