@@ -215,6 +215,7 @@ let state = {
   auditCustomFrom: "", auditCustomTo: "",
   loading: true, loadError: null,
   resumoMonth: todayISOMonthPrefix(), resumoChartDimension: "pagamento",
+  resumoPeriod: "mes", resumoCustomFrom: "", resumoCustomTo: "",
   recompraFilter: { window: "7", clientId: "", productName: "", status: "" },
   pedidosPaymentFilter: "todos", pedidosDeliveryFilter: "todos", receberQuery: "",
   movPeriod: "hoje", movProduct: "", movUser: "", movLocation: "", movType: "todos",
@@ -3982,7 +3983,7 @@ function topNWithOthers(map, n = 7) {
 
 // Todos os recortes disponíveis pro gráfico interativo do Resumo — cada um
 // é um jeito diferente de "fatiar" as vendas do mês selecionado.
-function resumoChartDatasets(monthSales, monthPrefix) {
+function resumoChartDatasets(monthSales, from, to) {
   const byPayment = {};
   monthSales.forEach((s) => { const l = paymentLabel(s.payment_method); byPayment[l] = (byPayment[l] || 0) + Number(s.total); });
 
@@ -3998,7 +3999,15 @@ function resumoChartDatasets(monthSales, monthPrefix) {
   const byLocation = {};
   monthSales.forEach((s) => { const l = s.location || "Não informado"; byLocation[l] = (byLocation[l] || 0) + Number(s.total); });
 
-  const monthOrders = computeOrders().filter((o) => o.soldAt.slice(0, 7) === monthPrefix);
+  // Mesmo intervalo de datas do filtro de vendas, aplicado aos pedidos —
+  // assim os recortes de status de pagamento/entrega sempre refletem o
+  // mesmo período selecionado no filtro, e não um mês fixo.
+  const monthOrders = computeOrders().filter((o) => {
+    const t = new Date(o.soldAt);
+    if (from && t < from) return false;
+    if (to && t > to) return false;
+    return true;
+  });
   const byPaymentStatus = {};
   monthOrders.forEach((o) => { const l = o.paymentStatus === "pago" ? "🟢 Pago" : "🔴 Pendente"; byPaymentStatus[l] = (byPaymentStatus[l] || 0) + Number(o.total); });
   const byDeliveryStatus = {};
@@ -4093,8 +4102,9 @@ function exportFullReportExcel() {
       Status: g.saldo > 0.004 ? "Em aberto" : "Quitado",
     }));
 
-  // Vendas do mês selecionado no momento (mesmo recorte que o botão de exportar só o mês).
-  const monthSales = state.sales.filter((s) => s.sold_at.slice(0, 7) === state.resumoMonth);
+  // Vendas do período selecionado no momento na aba Resumo (mesmo recorte
+  // que o botão de exportar só o período, e o mesmo que alimenta o BI).
+  const monthSales = resumoFilteredSales();
   const monthSalesRows = monthSales
     .slice()
     .sort((a, b) => (a.sold_at < b.sold_at ? -1 : 1))
@@ -4107,30 +4117,76 @@ function exportFullReportExcel() {
 
   exportSheetsToExcel([
     { name: "Resumo mensal", rows: monthlyRows },
-    { name: "Vendas do mês", rows: monthSalesRows },
+    { name: "Vendas do período", rows: monthSalesRows },
     { name: "Estoque atual", rows: stockRows },
     { name: "Contas a receber", rows: receivableRows },
   ], `relatorio-cafe-sinceridade-${todayISO()}.xlsx`);
 }
 
 // ---- Resumo ----
+// Filtro de período do Resumo: reaproveita o mesmo periodRange() já usado em
+// Movimentações/Caixa/Auditoria (Hoje/Semana/Mês/Personalizado/Todos), mais
+// uma opção extra "mes_especifico" pra escolher um mês do histórico pelo
+// nome — é o mesmo recorte que já existia antes, só que agora como mais uma
+// opção de período em vez de ser a única forma de filtrar.
+const RESUMO_PERIODS = [
+  { id: "hoje", label: "Hoje" },
+  { id: "semana", label: "7 dias" },
+  { id: "mes", label: "Este mês" },
+  { id: "mes_especifico", label: "Escolher mês" },
+  { id: "personalizado", label: "Período" },
+  { id: "todos", label: "Tudo" },
+];
+
+function monthRange(monthPrefix) {
+  const [y, m] = monthPrefix.split("-").map(Number);
+  return [new Date(y, m - 1, 1, 0, 0, 0, 0), new Date(y, m, 0, 23, 59, 59, 999)];
+}
+function resumoPeriodRange() {
+  if (state.resumoPeriod === "mes_especifico") return monthRange(state.resumoMonth);
+  return periodRange(state.resumoPeriod, state.resumoCustomFrom, state.resumoCustomTo);
+}
+// Reaproveitada também pelo "Exportar relatório completo", pra planilha
+// sempre bater com o que está na tela.
+function resumoFilteredSales() {
+  const [from, to] = resumoPeriodRange();
+  return state.sales.filter((s) => {
+    const t = new Date(s.sold_at);
+    if (from && t < from) return false;
+    if (to && t > to) return false;
+    return true;
+  });
+}
+function resumoPeriodLabel() {
+  const p = state.resumoPeriod;
+  if (p === "hoje") return "hoje";
+  if (p === "semana") return "últimos 7 dias";
+  if (p === "mes") return "este mês";
+  if (p === "todos") return "todo o período";
+  if (p === "mes_especifico") {
+    const [y, m] = state.resumoMonth.split("-");
+    return `${MONTH_NAMES[Number(m) - 1]} de ${y}`;
+  }
+  if (p === "personalizado" && state.resumoCustomFrom && state.resumoCustomTo) {
+    return `${fmtDateBR(state.resumoCustomFrom)} a ${fmtDateBR(state.resumoCustomTo)}`;
+  }
+  return "período selecionado";
+}
+
 function renderResumo() {
   const availableMonths = Array.from(new Set(state.sales.map((s) => s.sold_at.slice(0, 7)))).sort().reverse();
   if (!availableMonths.includes(state.resumoMonth)) {
     if (!availableMonths.includes(todayISOMonthPrefix())) availableMonths.unshift(todayISOMonthPrefix());
     state.resumoMonth = availableMonths[0] || todayISOMonthPrefix();
   }
-  const monthPrefix = state.resumoMonth;
-  const monthLabel = () => {
-    const [y, m] = monthPrefix.split("-");
-    return `${MONTH_NAMES[Number(m) - 1]} de ${y}`;
-  };
+  const periodLabel = resumoPeriodLabel();
 
   const today = todayISO();
   const todaySales = state.sales.filter((s) => s.sold_at.slice(0, 10) === today);
   const todayRevenue = todaySales.reduce((s, x) => s + Number(x.total), 0);
 
-  const monthSales = state.sales.filter((s) => s.sold_at.slice(0, 7) === monthPrefix);
+  const [periodFrom, periodTo] = resumoPeriodRange();
+  const monthSales = resumoFilteredSales();
   const monthRevenue = monthSales.reduce((s, x) => s + Number(x.total), 0);
 
   const stockValueMhu = state.products.reduce((s, p) => s + Number(p.price) * Number(p.qty_mhu || 0), 0);
@@ -4161,33 +4217,42 @@ function renderResumo() {
   });
   const sellerRanking = Object.entries(salesBySeller).sort((a, b) => b[1] - a[1]);
 
-  const chartDatasets = resumoChartDatasets(monthSales, monthPrefix);
+  const chartDatasets = resumoChartDatasets(monthSales, periodFrom, periodTo);
   const activeChart = chartDatasets[state.resumoChartDimension] || chartDatasets.pagamento;
 
   const monthOptions = availableMonths.map((m) => {
     const [y, mo] = m.split("-");
-    return `<option value="${m}" ${m === monthPrefix ? "selected" : ""}>${MONTH_NAMES[Number(mo) - 1]} de ${y}</option>`;
+    return `<option value="${m}" ${m === state.resumoMonth ? "selected" : ""}>${MONTH_NAMES[Number(mo) - 1]} de ${y}</option>`;
   }).join("");
 
   $("#main").innerHTML = `
     <div class="grid2" style="margin-bottom:20px;">
       <div class="metric"><div class="label">📈 Receita hoje</div><div class="value mono">${money(todayRevenue)}</div></div>
-      <div class="metric"><div class="label">📊 Receita do mês</div><div class="value mono">${money(monthRevenue)}</div></div>
+      <div class="metric"><div class="label">📊 Receita do período</div><div class="value mono">${money(monthRevenue)}</div></div>
       <div class="metric"><div class="label">📦 Valor em estoque</div><div class="value mono">${money(stockValue)}</div></div>
       <div class="metric"><div class="label">🛒 Vendas hoje</div><div class="value mono">${todaySales.length}</div></div>
     </div>
 
     <div class="card" style="margin-bottom:20px;">
-      <div class="row" style="margin-bottom:10px;">
-        <p style="margin:0;font-size:13px;font-weight:500;color:var(--muted);">Vendas por mês</p>
-        <select id="resumo-month-select" style="width:auto;max-width:200px;">${monthOptions}</select>
+      <p style="margin:0 0 10px;font-size:13px;font-weight:500;color:var(--muted);">Período do relatório</p>
+      <div class="rc-filter-pills" style="margin-bottom:10px;">
+        ${RESUMO_PERIODS.map((o) => `<button class="rc-pill resumo-period-pill ${state.resumoPeriod === o.id ? "active" : ""}" data-period="${o.id}">${o.label}</button>`).join("")}
       </div>
-      <p style="margin:0;font-size:12px;color:var(--muted2);">Exibindo dados de <b>${monthLabel()}</b>: ${monthSales.length} venda${monthSales.length === 1 ? "" : "s"}, total ${money(monthRevenue)}.</p>
+      ${state.resumoPeriod === "mes_especifico" ? `
+        <select id="resumo-month-select" style="margin-bottom:10px;">${monthOptions}</select>
+      ` : ""}
+      ${state.resumoPeriod === "personalizado" ? `
+        <div class="grid2" style="margin-bottom:10px;">
+          <div><label class="field-label">De</label><input id="resumo-from" type="date" value="${state.resumoCustomFrom}" /></div>
+          <div><label class="field-label">Até</label><input id="resumo-to" type="date" value="${state.resumoCustomTo}" /></div>
+        </div>
+      ` : ""}
+      <p style="margin:0;font-size:12px;color:var(--muted2);">Exibindo dados de <b>${periodLabel}</b>: ${monthSales.length} venda${monthSales.length === 1 ? "" : "s"}, total ${money(monthRevenue)}.</p>
     </div>
 
     <div class="card" style="margin-bottom:20px;">
-      <p style="margin:0 0 4px;font-size:13px;font-weight:500;color:var(--muted);">📊 Painel (BI) — ${monthLabel()}</p>
-      <p style="margin:0 0 12px;font-size:12px;color:var(--muted2);">Escolha como quer fatiar as vendas do mês.</p>
+      <p style="margin:0 0 4px;font-size:13px;font-weight:500;color:var(--muted);">📊 Painel (BI) — ${periodLabel}</p>
+      <p style="margin:0 0 12px;font-size:12px;color:var(--muted2);">Escolha como quer fatiar as vendas do período.</p>
       <div class="rc-filter-pills" style="margin-bottom:14px;">
         ${Object.entries(chartDatasets).map(([key, d]) => `<button class="rc-pill resumo-chart-pill ${state.resumoChartDimension === key ? "active" : ""}" data-dim="${key}">${d.label}</button>`).join("")}
       </div>
@@ -4202,7 +4267,7 @@ function renderResumo() {
 
     ${hasCostData ? `
       <div class="card" style="margin-bottom:20px;background:var(--warn-bg);border-color:var(--warn-border);">
-        <p style="margin:0 0 6px;font-size:13px;font-weight:500;color:var(--warn-text);">💰 Lucro estimado do mês</p>
+        <p style="margin:0 0 6px;font-size:13px;font-weight:500;color:var(--warn-text);">💰 Lucro estimado do período</p>
         <p class="value mono" style="margin:0;color:var(--accent-dark);">${money(monthProfit)}</p>
         <p style="margin:6px 0 0;font-size:11px;color:var(--warn-text);">Aproximado — baseado no custo registrado em cada venda, já descontando os descontos concedidos.</p>
       </div>` : ""}
@@ -4214,15 +4279,15 @@ function renderResumo() {
       </div>` : ""}
 
     <div class="card" style="margin-bottom:20px;">
-      <p style="margin:0 0 10px;font-size:13px;font-weight:500;color:var(--muted);">Ranking de produtos — ${monthLabel()}</p>
-      ${ranking.length === 0 ? `<p style="font-size:13px;color:var(--muted2);">Sem vendas neste mês.</p>` : ranking.map(([name, qty], i) => `
+      <p style="margin:0 0 10px;font-size:13px;font-weight:500;color:var(--muted);">Ranking de produtos — ${periodLabel}</p>
+      ${ranking.length === 0 ? `<p style="font-size:13px;color:var(--muted2);">Sem vendas neste período.</p>` : ranking.map(([name, qty], i) => `
         <div class="row" style="font-size:14px;padding:4px 0;"><span>${i + 1}. ${escapeHtml(name)}</span><span class="mono" style="color:var(--muted);">${Number(qty.toFixed(2))}</span></div>
       `).join("")}
     </div>
 
     <div class="card" style="margin-bottom:20px;">
-      <p style="margin:0 0 10px;font-size:13px;font-weight:500;color:var(--muted);">Ranking de clientes — ${monthLabel()}</p>
-      ${clientRanking.length === 0 ? `<p style="font-size:13px;color:var(--muted2);">Sem vendas neste mês.</p>` : clientRanking.map(([name, info], i) => `
+      <p style="margin:0 0 10px;font-size:13px;font-weight:500;color:var(--muted);">Ranking de clientes — ${periodLabel}</p>
+      ${clientRanking.length === 0 ? `<p style="font-size:13px;color:var(--muted2);">Sem vendas neste período.</p>` : clientRanking.map(([name, info], i) => `
         <div class="row" style="font-size:14px;padding:4px 0;">
           <span>${i + 1}. ${escapeHtml(name)} <span style="color:var(--muted2);font-size:12px;">(${info.count} compra${info.count === 1 ? "" : "s"})</span></span>
           <span class="mono" style="color:var(--muted);">${money(info.total)}</span>
@@ -4231,8 +4296,8 @@ function renderResumo() {
     </div>
 
     <div class="card" style="margin-bottom:20px;">
-      <p style="margin:0 0 10px;font-size:13px;font-weight:500;color:var(--muted);">Ranking de vendedores — ${monthLabel()}</p>
-      ${sellerRanking.length === 0 ? `<p style="font-size:13px;color:var(--muted2);">Sem vendas neste mês.</p>` : sellerRanking.map(([name, total], i) => `
+      <p style="margin:0 0 10px;font-size:13px;font-weight:500;color:var(--muted);">Ranking de vendedores — ${periodLabel}</p>
+      ${sellerRanking.length === 0 ? `<p style="font-size:13px;color:var(--muted2);">Sem vendas neste período.</p>` : sellerRanking.map(([name, total], i) => `
         <div class="row" style="font-size:14px;padding:4px 0;"><span>${i + 1}. ${escapeHtml(name)}</span><span class="mono" style="color:var(--muted);">${money(total)}</span></div>
       `).join("")}
     </div>
@@ -4241,17 +4306,22 @@ function renderResumo() {
       <p style="margin:0 0 4px;font-size:13px;font-weight:500;color:var(--muted);">📊 Exportar para Excel</p>
       <p style="margin:0 0 12px;font-size:12px;color:var(--muted2);">Planilhas prontas pra apurar números e definir metas.</p>
       <div style="display:flex;flex-direction:column;gap:8px;">
-        <button class="btn" id="btn-export-month" style="width:100%;">Exportar vendas de ${monthLabel()} (.xlsx)</button>
+        <button class="btn" id="btn-export-month" style="width:100%;">Exportar vendas de ${periodLabel} (.xlsx)</button>
         <button class="btn btn-accent" id="btn-export-full" style="width:100%;">Exportar relatório completo (.xlsx)</button>
       </div>
     </div>
   `;
 
-  $("#resumo-month-select").onchange = (e) => { state.resumoMonth = e.target.value; renderResumo(); };
+  $$(".resumo-period-pill", $("#main")).forEach((btn) => {
+    btn.onclick = () => { state.resumoPeriod = btn.dataset.period; renderResumo(); };
+  });
+  $("#resumo-month-select") && ($("#resumo-month-select").onchange = (e) => { state.resumoMonth = e.target.value; renderResumo(); });
+  $("#resumo-from") && ($("#resumo-from").onchange = (e) => { state.resumoCustomFrom = e.target.value; renderResumo(); });
+  $("#resumo-to") && ($("#resumo-to").onchange = (e) => { state.resumoCustomTo = e.target.value; renderResumo(); });
   $$(".resumo-chart-pill", $("#main")).forEach((btn) => {
     btn.onclick = () => { state.resumoChartDimension = btn.dataset.dim; renderResumo(); };
   });
-  $("#btn-export-month").onclick = () => exportMonthSalesExcel(monthSales, monthLabel());
+  $("#btn-export-month").onclick = () => exportMonthSalesExcel(monthSales, periodLabel);
   $("#btn-export-full").onclick = () => exportFullReportExcel();
 }
 
