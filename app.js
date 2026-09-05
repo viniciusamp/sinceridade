@@ -214,8 +214,8 @@ let state = {
   auditUser: "", auditTable: "", auditAction: "todos", auditPeriod: "todos",
   auditCustomFrom: "", auditCustomTo: "",
   loading: true, loadError: null,
-  resumoMonth: todayISOMonthPrefix(), resumoChartDimension: "pagamento",
-  resumoPeriod: "mes", resumoCustomFrom: "", resumoCustomTo: "",
+  resumoChartDimension: "pagamento",
+  resumoFrom: todayISOMonthPrefix() + "-01", resumoTo: new Date().toISOString().slice(0, 10),
   recompraFilter: { window: "7", clientId: "", productName: "", status: "" },
   pedidosPaymentFilter: "todos", pedidosDeliveryFilter: "todos", receberQuery: "",
   movPeriod: "hoje", movProduct: "", movUser: "", movLocation: "", movType: "todos",
@@ -4124,27 +4124,12 @@ function exportFullReportExcel() {
 }
 
 // ---- Resumo ----
-// Filtro de período do Resumo: reaproveita o mesmo periodRange() já usado em
-// Movimentações/Caixa/Auditoria (Hoje/Semana/Mês/Personalizado/Todos), mais
-// uma opção extra "mes_especifico" pra escolher um mês do histórico pelo
-// nome — é o mesmo recorte que já existia antes, só que agora como mais uma
-// opção de período em vez de ser a única forma de filtrar.
-const RESUMO_PERIODS = [
-  { id: "hoje", label: "Hoje" },
-  { id: "semana", label: "7 dias" },
-  { id: "mes", label: "Este mês" },
-  { id: "mes_especifico", label: "Escolher mês" },
-  { id: "personalizado", label: "Período" },
-  { id: "todos", label: "Tudo" },
-];
-
-function monthRange(monthPrefix) {
-  const [y, m] = monthPrefix.split("-").map(Number);
-  return [new Date(y, m - 1, 1, 0, 0, 0, 0), new Date(y, m, 0, 23, 59, 59, 999)];
-}
+// Filtro de período livre: dois campos de data (De / Até) que a pessoa edita
+// diretamente, sem atalhos fixos — cada mudança já refiltra tudo (BI,
+// rankings, exportação). Reaproveita o periodRange() genérico já usado em
+// Movimentações/Caixa/Auditoria, passando sempre "personalizado".
 function resumoPeriodRange() {
-  if (state.resumoPeriod === "mes_especifico") return monthRange(state.resumoMonth);
-  return periodRange(state.resumoPeriod, state.resumoCustomFrom, state.resumoCustomTo);
+  return periodRange("personalizado", state.resumoFrom, state.resumoTo);
 }
 // Reaproveitada também pelo "Exportar relatório completo", pra planilha
 // sempre bater com o que está na tela.
@@ -4158,27 +4143,13 @@ function resumoFilteredSales() {
   });
 }
 function resumoPeriodLabel() {
-  const p = state.resumoPeriod;
-  if (p === "hoje") return "hoje";
-  if (p === "semana") return "últimos 7 dias";
-  if (p === "mes") return "este mês";
-  if (p === "todos") return "todo o período";
-  if (p === "mes_especifico") {
-    const [y, m] = state.resumoMonth.split("-");
-    return `${MONTH_NAMES[Number(m) - 1]} de ${y}`;
+  if (state.resumoFrom && state.resumoTo) {
+    return `${fmtDateBR(state.resumoFrom)} a ${fmtDateBR(state.resumoTo)}`;
   }
-  if (p === "personalizado" && state.resumoCustomFrom && state.resumoCustomTo) {
-    return `${fmtDateBR(state.resumoCustomFrom)} a ${fmtDateBR(state.resumoCustomTo)}`;
-  }
-  return "período selecionado";
+  return "todo o período";
 }
 
 function renderResumo() {
-  const availableMonths = Array.from(new Set(state.sales.map((s) => s.sold_at.slice(0, 7)))).sort().reverse();
-  if (!availableMonths.includes(state.resumoMonth)) {
-    if (!availableMonths.includes(todayISOMonthPrefix())) availableMonths.unshift(todayISOMonthPrefix());
-    state.resumoMonth = availableMonths[0] || todayISOMonthPrefix();
-  }
   const periodLabel = resumoPeriodLabel();
 
   const today = todayISO();
@@ -4220,11 +4191,6 @@ function renderResumo() {
   const chartDatasets = resumoChartDatasets(monthSales, periodFrom, periodTo);
   const activeChart = chartDatasets[state.resumoChartDimension] || chartDatasets.pagamento;
 
-  const monthOptions = availableMonths.map((m) => {
-    const [y, mo] = m.split("-");
-    return `<option value="${m}" ${m === state.resumoMonth ? "selected" : ""}>${MONTH_NAMES[Number(mo) - 1]} de ${y}</option>`;
-  }).join("");
-
   $("#main").innerHTML = `
     <div class="grid2" style="margin-bottom:20px;">
       <div class="metric"><div class="label">📈 Receita hoje</div><div class="value mono">${money(todayRevenue)}</div></div>
@@ -4235,18 +4201,10 @@ function renderResumo() {
 
     <div class="card" style="margin-bottom:20px;">
       <p style="margin:0 0 10px;font-size:13px;font-weight:500;color:var(--muted);">Período do relatório</p>
-      <div class="rc-filter-pills" style="margin-bottom:10px;">
-        ${RESUMO_PERIODS.map((o) => `<button class="rc-pill resumo-period-pill ${state.resumoPeriod === o.id ? "active" : ""}" data-period="${o.id}">${o.label}</button>`).join("")}
+      <div class="grid2" style="margin-bottom:10px;">
+        <div><label class="field-label">De</label><input id="resumo-from" type="date" value="${state.resumoFrom}" /></div>
+        <div><label class="field-label">Até</label><input id="resumo-to" type="date" value="${state.resumoTo}" /></div>
       </div>
-      ${state.resumoPeriod === "mes_especifico" ? `
-        <select id="resumo-month-select" style="margin-bottom:10px;">${monthOptions}</select>
-      ` : ""}
-      ${state.resumoPeriod === "personalizado" ? `
-        <div class="grid2" style="margin-bottom:10px;">
-          <div><label class="field-label">De</label><input id="resumo-from" type="date" value="${state.resumoCustomFrom}" /></div>
-          <div><label class="field-label">Até</label><input id="resumo-to" type="date" value="${state.resumoCustomTo}" /></div>
-        </div>
-      ` : ""}
       <p style="margin:0;font-size:12px;color:var(--muted2);">Exibindo dados de <b>${periodLabel}</b>: ${monthSales.length} venda${monthSales.length === 1 ? "" : "s"}, total ${money(monthRevenue)}.</p>
     </div>
 
@@ -4312,12 +4270,8 @@ function renderResumo() {
     </div>
   `;
 
-  $$(".resumo-period-pill", $("#main")).forEach((btn) => {
-    btn.onclick = () => { state.resumoPeriod = btn.dataset.period; renderResumo(); };
-  });
-  $("#resumo-month-select") && ($("#resumo-month-select").onchange = (e) => { state.resumoMonth = e.target.value; renderResumo(); });
-  $("#resumo-from") && ($("#resumo-from").onchange = (e) => { state.resumoCustomFrom = e.target.value; renderResumo(); });
-  $("#resumo-to") && ($("#resumo-to").onchange = (e) => { state.resumoCustomTo = e.target.value; renderResumo(); });
+  $("#resumo-from").onchange = (e) => { state.resumoFrom = e.target.value; renderResumo(); };
+  $("#resumo-to").onchange = (e) => { state.resumoTo = e.target.value; renderResumo(); };
   $$(".resumo-chart-pill", $("#main")).forEach((btn) => {
     btn.onclick = () => { state.resumoChartDimension = btn.dataset.dim; renderResumo(); };
   });
